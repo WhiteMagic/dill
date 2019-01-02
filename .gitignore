@@ -1,0 +1,6 @@
+/.vs
+*~
+*.sw[op]
+/bin
+/lib
+CMakeSettings.json
