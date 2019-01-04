@@ -738,17 +738,5 @@ std::vector<int> used_axis_indices(GUID guid)
     if(state.rglSlider[0] != 0) { used_indices.push_back(7); }
     if(state.rglSlider[1] != 0) { used_indices.push_back(8); }
 
-    logger->info(
-        "{} {} {} {} {} {} {} {}",
-        state.lX,
-        state.lY,
-        state.lZ,
-        state.lRx,
-        state.lRy,
-        state.lRz,
-        state.rglSlider[0],
-        state.rglSlider[1]
-    );
-
     return used_indices;
 }
