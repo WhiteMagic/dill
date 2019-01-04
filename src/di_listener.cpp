@@ -355,19 +355,31 @@ HWND create_window()
     return window_hdl;
 }
 
-BOOL CALLBACK extract_axis_data(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
+BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
 {
-    DeviceSummary * info = reinterpret_cast<DeviceSummary*>(pvRef);
+    LPDIRECTINPUTDEVICE8 device = reinterpret_cast<LPDIRECTINPUTDEVICE8>(pvRef);
     if(lpddoi->dwType & DIDFT_AXIS)
     {
-        AxisData data;
-        data.linear_index = info->axis_count;
-        data.axis_index = DIDFT_GETINSTANCE(lpddoi->dwType);
-        strcpy_s(data.name, MAX_PATH, lpddoi->tszName);
-        info->axis_data[info->axis_count] = data;
-        info->axis_count++;
+        DIPROPRANGE range;
+
+        ZeroMemory(&range, sizeof(range));
+        range.diph.dwSize = sizeof(range);
+        range.diph.dwHeaderSize = sizeof(range.diph);
+        range.diph.dwObj = lpddoi->dwType;
+        range.diph.dwHow = DIPH_BYID;
+        range.lMin = -32768;
+        range.lMax = 32767;
+
+        auto result = device->SetProperty(DIPROP_RANGE, &range.diph);
+        if(FAILED(result))
+        {
+            logger->error(
+                "Error while setting axis range, {}",
+                error_to_string(result)
+            );
+            return DIENUM_CONTINUE;
+        }
     }
-    assert(info->axis_count <= 8);
     return DIENUM_CONTINUE;
 }
 
@@ -441,7 +453,7 @@ void initialize_device(GUID guid, std::string name)
         );
     }
  
-    // Set properties
+    // Set device buffer size property
     DIPROPDWORD prop_word;
     DIPROPHEADER prop_header;
     prop_header.dwSize = sizeof(DIPROPDWORD);
@@ -451,10 +463,7 @@ void initialize_device(GUID guid, std::string name)
     prop_word.diph = prop_header;
     prop_word.dwData = g_buffer_size;
     
-    result = device->SetProperty(
-         DIPROP_BUFFERSIZE,
-         &prop_header
-    );
+    result = device->SetProperty(DIPROP_BUFFERSIZE, &prop_header);
     if(FAILED(result))
     {
         logger->error(
@@ -475,12 +484,8 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    /*
-    DIPROPRANGE result;
-    device->GetProperty(DIPROP_LOGICALRANGE, &result.diph);
-
-    logger->info("{:d} {:d}", result.lMin, result.lMax);
-    */
+    // Set the axis range for each axis of the device
+    device->EnumObjects(set_axis_range, device, DIDFT_ALL);
 
     // Query device capabilities
     DIDEVCAPS capabilities;
