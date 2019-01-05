@@ -66,6 +66,7 @@ struct JoystickInputData
 {
     GUID                                device_guid;
     JoystickInputType                   input_type;
+    // In case of an axis this is the axis_index and not the linear_index
     UINT8                               input_index;
     LONG                                value;
 };
@@ -73,13 +74,12 @@ struct JoystickInputData
 /**
  * \brief Stores axis information.
  *
- * Stores the ID and name of a single axis.
+ * Stores the linear and axis index of a single axis.
  */
 struct AxisData
 {
     DWORD                               linear_index;
     DWORD                               axis_index;
-    char                                name[MAX_PATH];
 };
 
 /**
@@ -119,10 +119,14 @@ struct DeviceDataStore
 {
     //! Maps from GUID to DirectInput device instance
     std::unordered_map<GUID, LPDIRECTINPUTDEVICE8> device_map;
+    //! Indicates whether or not a device is buffered
+    std::unordered_map<GUID, bool> is_buffered;
     //! Caches DeviceSummary for devices
     std::unordered_map<GUID, DeviceSummary> cache;
     //! Last known state of the device
     std::unordered_map<GUID, DeviceState> state;
+    //! Flag indicating whether or not the device is fully operational
+    std::unordered_map<GUID, bool> is_ready;
     //! Mutex sycnrhonizing access to the members
     std::mutex mutex;
 };

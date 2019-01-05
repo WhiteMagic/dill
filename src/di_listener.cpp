@@ -66,6 +66,7 @@ std::string error_to_string(DWORD error_code)
         {DIERR_NOINTERFACE, "The specified interface is not supported by the object (DIERR_NOINTERFACE)"},
         {DIERR_OBJECTNOTFOUND, "The requested object does not exist. (DIERR_OBJECTNOTFOUND)"},
         {DIERR_UNSUPPORTED, "The function called is not supported at this time (DIERR_UNSUPPORTED)"},
+        {DI_POLLEDDEVICE, "The device is a polled device.  As a result, device buffering will not collect any data and event notifications will not be signalled until GetDeviceState is called. (DI_POLLEDDEVICE)"}
     };
 
     auto itr = lut.find(error_code);
@@ -240,6 +241,20 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
 
 void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
 {
+    // Poll device to get things going
+    auto result = instance->Poll();
+    if(FAILED(result))
+    {
+        logger->error(
+            "{} Polling failed, {}",
+            guid_to_string(guid),
+            error_to_string(result)
+        );
+
+        instance->Acquire();
+        instance->Poll();
+    }
+
     // Retrieve buffered data
     DIDEVICEOBJECTDATA device_data[g_buffer_size]; 
     DWORD object_count = g_buffer_size;
@@ -278,6 +293,141 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
                 error_to_string(result)
             );
             object_count = 0;
+
+            // If this failure arose due to buffered reading not being possible
+            // revert the device to polled mode
+            if(result == DIERR_NOTBUFFERED)
+            {
+                logger->error(
+                    "{} Failed reading device in buffered mode, falling back to polling, {}",
+                    guid_to_string(guid),
+                    error_to_string(result)
+                );
+                g_data_store.is_buffered[guid] = false;
+            }
+        }
+    }
+}
+
+void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
+{
+    // Poll device to update internal state
+    auto result = instance->Poll();
+    if(FAILED(result))
+    {
+        logger->error(
+            "{} Polling failed, {}",
+            guid_to_string(guid),
+            error_to_string(result)
+        );
+
+        instance->Acquire();
+        instance->Poll();
+    }
+
+    // Obtain device state
+    DIJOYSTATE2 state;
+    result = instance->GetDeviceState(sizeof(DIJOYSTATE2), &state);
+    if(FAILED(result))
+    {
+        logger->error(
+            "{} Retrieving device state failed, {}",
+            guid_to_string(guid),
+            error_to_string(result)
+        );
+        return;
+    }
+
+    // Event structure to use with the callback
+    JoystickInputData evt;
+    evt.device_guid = guid;
+
+    // Detect and handle axis state changes
+    for(size_t i=0; i<g_data_store.cache[guid].axis_count; ++i)
+    {
+        auto axis_index = g_data_store.cache[guid].axis_data[i].axis_index;
+        auto value = 0;
+        if     (axis_index == 1) { value = state.lX; }
+        else if(axis_index == 2) { value = state.lY; }
+        else if(axis_index == 3) { value = state.lZ; }
+        else if(axis_index == 4) { value = state.lRx; }
+        else if(axis_index == 5) { value = state.lRy; }
+        else if(axis_index == 6) { value = state.lRz; }
+        else if(axis_index == 7) { value = state.rglSlider[0]; }
+        else if(axis_index == 8) { value = state.rglSlider[1]; }
+
+        if(g_data_store.state[guid].axis[axis_index] != value)
+        {
+            evt.input_type = JoystickInputType::Axis;
+            evt.input_index = static_cast<UINT8>(axis_index);
+            evt.value = value;
+            g_data_store.state[guid].axis[axis_index] = value;
+
+            logger->info(
+                "{}: Axis   {} value={}",
+                guid_to_string(guid),
+                axis_index,
+                value
+            );
+
+            if(g_event_callback != nullptr)
+            {
+                g_event_callback(evt);
+            }
+        }
+    }
+
+    // Detect and handle button state changes
+    for(size_t i=0; i<g_data_store.cache[guid].button_count; ++i)
+    {
+        auto is_pressed = (state.rgbButtons[i] & 0x0080) == 0 ? false : true;
+        if(g_data_store.state[guid].button[i+1] != is_pressed)
+        {
+            evt.input_type = JoystickInputType::Button;
+            evt.input_index = static_cast<UINT8>(i + 1);
+            evt.value = is_pressed;
+            g_data_store.state[guid].button[evt.input_index] = is_pressed;
+
+            logger->info(
+                "{}: Button {:d} pressed={}",
+                guid_to_string(guid),
+                evt.input_index,
+                evt.value
+            );
+
+            if(g_event_callback != nullptr)
+            {
+                g_event_callback(evt);
+            }
+        }
+    }
+
+    // Detect and handle hat state changes
+    for(size_t i=0; i<g_data_store.cache[guid].hat_count; ++i)
+    {
+        LONG direction = state.rgdwPOV[i];
+        if(direction < 0 || direction > 36000)
+        {
+            direction = -1;
+        }
+        if(g_data_store.state[guid].hat[i] != direction)
+        {
+            evt.input_type = JoystickInputType::Hat;
+            evt.input_index = static_cast<UINT8>(i);
+            evt.value = direction;
+            g_data_store.state[guid].hat[evt.input_index] = evt.value;
+
+            logger->info(
+                "{}: Hat    {:d} direction={}",
+                guid_to_string(guid),
+                evt.input_index,
+                evt.value
+            );
+
+            if(g_event_callback != nullptr)
+            {
+                g_event_callback(evt);
+            }
         }
     }
 }
@@ -290,7 +440,23 @@ DWORD WINAPI joystick_update_thread(LPVOID l_param)
             std::lock_guard<std::mutex> lock(g_data_store.mutex);
             for(auto & entry : g_data_store.device_map)
             {
-                process_buffered_events(entry.second, entry.first);
+                if(!g_data_store.is_ready[entry.first])
+                {
+                    logger->info(
+                        "Skipping device {}, not yet fully initialized",
+                        guid_to_string(entry.first)
+                    );
+                    continue;
+                }
+
+                if(g_data_store.is_buffered[entry.first])
+                {
+                    process_buffered_events(entry.second, entry.first);
+                }
+                else
+                {
+                    poll_device(entry.second, entry.first);
+                }
             }
         }
         SleepEx(4, false);
@@ -385,6 +551,9 @@ BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
 
 void initialize_device(GUID guid, std::string name)
 {
+    // Prevent any operations on this device until initialization is done
+    g_data_store.is_ready[guid] = false;
+
     // Check if we have an existing instance in the device map
     auto execute_callback = true;
     {
@@ -462,7 +631,9 @@ void initialize_device(GUID guid, std::string name)
     prop_header.dwHow = DIPH_DEVICE;
     prop_word.diph = prop_header;
     prop_word.dwData = g_buffer_size;
-    
+    // By default assume the device supports buffered reading and revert
+    // to polled upon failure
+    g_data_store.is_buffered[guid] = true;
     result = device->SetProperty(DIPROP_BUFFERSIZE, &prop_header);
     if(FAILED(result))
     {
@@ -471,6 +642,11 @@ void initialize_device(GUID guid, std::string name)
             guid_to_string(guid),
             error_to_string(result)
         );
+    }
+    if(result == DI_POLLEDDEVICE)
+    {
+        logger->warn("Device {} is not buffered", guid_to_string(guid));
+        g_data_store.is_buffered[guid] = false;
     }
 
     // Acquire device
@@ -483,9 +659,6 @@ void initialize_device(GUID guid, std::string name)
             error_to_string(result)
         );
     }
-
-    // Set the axis range for each axis of the device
-    device->EnumObjects(set_axis_range, device, DIDFT_ALL);
 
     // Query device capabilities
     DIDEVCAPS capabilities;
@@ -510,7 +683,6 @@ void initialize_device(GUID guid, std::string name)
     {
         info.axis_data[i].linear_index = 0;
         info.axis_data[i].axis_index = 0;
-        info.axis_data[i].name[0] = '\0';
     }
 
     auto axis_indices = used_axis_indices(guid);
@@ -524,11 +696,17 @@ void initialize_device(GUID guid, std::string name)
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
 
+    // Set the axis range for each axis of the device
+    device->EnumObjects(set_axis_range, device, DIDFT_ALL);
+
     g_data_store.cache[guid] = info;
     if(g_device_change_callback != nullptr && execute_callback)
     {
         g_device_change_callback(info);
     }
+
+    // Allow operating on the device
+    g_data_store.is_ready[guid] = true;
 }
 
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data)
