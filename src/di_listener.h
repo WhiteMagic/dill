@@ -218,7 +218,7 @@ BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data);
 /**
  * \brief Fill struct with things
  */
-BOOL CALLBACK extract_axis_data(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef);
+BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef);
 
 /**
  * \brief Enumerates all DirectInput devices present on the system.
