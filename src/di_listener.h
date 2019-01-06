@@ -130,7 +130,9 @@ struct DeviceDataStore
     std::unordered_map<GUID, DeviceState> state;
     //! Flag indicating whether or not the device is fully operational
     std::unordered_map<GUID, bool> is_ready;
-    //! Mutex sycnrhonizing access to the members
+    //! List of active GUIDs
+    std::vector<GUID> active_guids;
+    //! Mutex synchronizing access to the members
     std::mutex mutex;
 };
 
@@ -299,6 +301,23 @@ extern "C"
      */
     __declspec(dllexport)
     void set_device_change_callback(DeviceChangeCallback cb);
+
+    /**
+     * \brief Returns the DeviceSummary for the device with the provided index.
+     *
+     * \param index index of the device to return
+     * \param DeviceSummary of the device with the provided index
+     */
+    __declspec(dllexport)
+    DeviceSummary get_device_information(size_t index);
+
+    /**
+     * \brief Returns the number of available devices.
+     *
+     * \return number of available devices
+     */
+    __declspec(dllexport)
+    size_t get_device_count();
 
     __declspec(dllexport)
     /**

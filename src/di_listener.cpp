@@ -693,6 +693,21 @@ void initialize_device(GUID guid, std::string name)
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
 
+    // Add device to list of active guids
+    bool add_guid = true;
+    for(size_t i=0; i<g_data_store.active_guids.size(); ++i)
+    {
+        if(g_data_store.active_guids[i] == guid)
+        {
+            add_guid = false;
+            break;
+        }
+    }
+    if(add_guid)
+    {
+        g_data_store.active_guids.push_back(guid);
+    }
+
     // Set the axis range for each axis of the device
     device->EnumObjects(set_axis_range, device, DIDFT_ALL);
 
@@ -792,6 +807,18 @@ void enumerate_devices()
             strcpy_s(di.name, MAX_PATH, "Unknown");
         }
         di.action = DeviceActionType::Disconnected;
+
+        // Remove guid from list of active ones
+        for(size_t i=0; i<g_data_store.active_guids.size(); ++i)
+        {
+            if(g_data_store.active_guids[i] == guid)
+            {
+                g_data_store.active_guids.erase(
+                    g_data_store.active_guids.begin() + i
+                );
+                break;
+            }
+        }
         
         if(g_device_change_callback != nullptr)
         {
@@ -851,6 +878,26 @@ void set_device_change_callback(DeviceChangeCallback cb)
 {
     logger->info("Setting device change callback");
     g_device_change_callback = cb;
+}
+
+DeviceSummary get_device_information(size_t index)
+{
+    if(index < 0 || index >= g_data_store.active_guids.size())
+    {
+        return DeviceSummary();
+    }
+    auto guid = g_data_store.active_guids[index];
+    if(g_data_store.cache.find(guid) == g_data_store.cache.end())
+    {
+        return DeviceSummary();
+    }
+
+    return g_data_store.cache[guid];
+}
+
+size_t get_device_count()
+{
+    return g_data_store.active_guids.size();
 }
 
 LONG get_axis(GUID guid, DWORD index)
