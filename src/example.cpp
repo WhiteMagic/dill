@@ -43,10 +43,13 @@ void device_change_callback(DeviceSummary info)
     if(info.action == DeviceActionType::Disconnected)
     {
         std::cout << fmt::format(
-            "{:12s}: {:30s} {}",
+            "{:12s}: {:30s} {} {} {} {}",
             "Disconnected",
             info.name,
-            guid_to_string(info.device_guid)
+            guid_to_string(info.device_guid),
+            info.vendor_id,
+            info.product_id,
+            info.joystick_id
         ) << std::endl;
         return;
     }
@@ -54,10 +57,13 @@ void device_change_callback(DeviceSummary info)
     g_device_info[info.device_guid] = info;
 
     std::cout << fmt::format(
-        "{:12s}: {:30s} {}",
+        "{:12s}: {:30s} {} {:X} {:X} {}",
         "Connected",
         info.name,
-        guid_to_string(info.device_guid)
+        guid_to_string(info.device_guid),
+        info.vendor_id,
+        info.product_id,
+        info.joystick_id
     ) << std::endl;
 }
 
