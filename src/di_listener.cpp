@@ -122,14 +122,8 @@ BOOL on_device_change(LPARAM l_param, WPARAM w_param)
     if(lpdb->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
     {
         path = std::string(lpdbv->dbcc_name);
-        if(w_param == DBT_DEVICEARRIVAL)
+        if(w_param == DBT_DEVICEARRIVAL || w_param == DBT_DEVICEREMOVECOMPLETE)
         {
-            //logger->info("Device connected:    {}", path);
-            enumerate_devices();
-        }
-        else if(w_param == DBT_DEVICEREMOVECOMPLETE)
-        {
-            //logger->info("Device disconnected: {}", path);
             enumerate_devices();
         }
     }
@@ -676,6 +670,9 @@ void initialize_device(GUID guid, std::string name)
     // Create device summary report
     DeviceSummary info;
     info.device_guid = guid;
+    info.vendor_id = get_vendor_id(device, guid);
+    info.product_id = get_product_id(device, guid);
+    info.joystick_id = get_joystick_id(device, guid);
     info.action = DeviceActionType::Connected;
     strcpy_s(info.name, MAX_PATH, name.c_str());
     info.axis_count = 0;
@@ -782,15 +779,20 @@ void enumerate_devices()
         logger->info("{}: Removing device", guid_to_string(guid));
         g_data_store.device_map.erase(guid);
 
-        // Emit DeviceInformation
+        // Emit DeviceInformation, copy existing device data if we know about
+        // the device and have an existing record, otherwise return a shell
         DeviceSummary di;
-        di.device_guid = guid;
-        di.action = DeviceActionType::Disconnected;
-        strcpy_s(di.name, MAX_PATH, "Unknown");
         if(g_data_store.cache.find(guid) != g_data_store.cache.end())
         {
-            strcpy_s(di.name, MAX_PATH, g_data_store.cache[guid].name);
+            di = g_data_store.cache[guid];
         }
+        else
+        {
+            di.device_guid = guid;
+            strcpy_s(di.name, MAX_PATH, "Unknown");
+        }
+        di.action = DeviceActionType::Disconnected;
+        
         if(g_device_change_callback != nullptr)
         {
             g_device_change_callback(di);
@@ -922,4 +924,88 @@ std::vector<int> used_axis_indices(GUID guid)
     if(state.rglSlider[1] != 0) { used_indices.push_back(8); }
 
     return used_indices;
+}
+
+DWORD get_vendor_id(LPDIRECTINPUTDEVICE8 device, GUID guid)
+{
+    DIPROPDWORD data;
+
+    ZeroMemory(&data, sizeof(DIPROPDWORD));
+    data.diph.dwSize = sizeof(DIPROPDWORD);
+    data.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    data.diph.dwObj = 0;
+    data.diph.dwHow = DIPH_DEVICE;
+
+    auto result = device->GetProperty(
+        DIPROP_VIDPID,
+        &data.diph
+    );
+
+    if(FAILED(result))
+    {
+        logger->critical(
+            "{} Failed retrieving joystick vendor id data, {}",
+            guid_to_string(guid),
+            error_to_string(result)
+        );
+        return 0;
+    }
+
+    return LOWORD(data.dwData);
+}
+
+DWORD get_product_id(LPDIRECTINPUTDEVICE8 device, GUID guid)
+{
+    DIPROPDWORD data;
+
+    ZeroMemory(&data, sizeof(DIPROPDWORD));
+    data.diph.dwSize = sizeof(DIPROPDWORD);
+    data.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    data.diph.dwObj = 0;
+    data.diph.dwHow = DIPH_DEVICE;
+
+    auto result = device->GetProperty(
+        DIPROP_VIDPID,
+        &data.diph
+    );
+
+    if(FAILED(result))
+    {
+        logger->critical(
+            "{} Failed retrieving joystick product id data, {}",
+            guid_to_string(guid),
+            error_to_string(result)
+        );
+        return 0;
+    }
+
+    return HIWORD(data.dwData);
+}
+
+DWORD get_joystick_id(LPDIRECTINPUTDEVICE8 device, GUID guid)
+{
+    DIPROPDWORD data;
+
+    ZeroMemory(&data, sizeof(DIPROPDWORD));
+    data.diph.dwSize = sizeof(DIPROPDWORD);
+    data.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    data.diph.dwObj = 0;
+    data.diph.dwHow = DIPH_DEVICE;
+
+    auto result = device->GetProperty(
+        DIPROP_JOYSTICKID,
+        &data.diph
+    );
+
+    if(FAILED(result))
+    {
+        logger->critical(
+            "{} Failed retrieving joystick id data, {}",
+            guid_to_string(guid),
+            error_to_string(result)
+        );
+        return 0;
+    }
+
+    return data.dwData;
 }

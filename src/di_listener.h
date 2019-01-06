@@ -92,6 +92,9 @@ struct AxisData
 struct DeviceSummary
 {
     GUID                                device_guid;
+    DWORD                               vendor_id;
+    DWORD                               product_id;
+    DWORD                               joystick_id;
     DeviceActionType                    action;
     char                                name[MAX_PATH];
     DWORD                               axis_count;
@@ -244,6 +247,34 @@ void initialize_device(GUID guid, std::string name);
  * \return list of used axes indices
  */
 std::vector<int> used_axis_indices(GUID guid);
+
+/**
+ * \brief Returns the vendor id of the HID device.
+ *
+ * \param device pointer to the device
+ * \param guid GUID of the device
+ * \return vendor usb id
+ */
+DWORD get_vendor_id(LPDIRECTINPUTDEVICE8 device, GUID guid);
+
+/**
+ * \brief Returns the product id of the HID device.
+ *
+ * \param device pointer to the device
+ * \param guid GUID of the device
+ * \return product usb id
+ */
+DWORD get_product_id(LPDIRECTINPUTDEVICE8 device, GUID guid);
+
+/**
+ * \brief Returns the joystick id assigned by windows to the device.
+ *
+ * \param device pointer to the device
+ * \param guid GUID of the device
+ * \return windows joystick id
+ */
+DWORD get_joystick_id(LPDIRECTINPUTDEVICE8 device, GUID guid);
+
 
 extern "C"
 {
