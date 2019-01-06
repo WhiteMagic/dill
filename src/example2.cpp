@@ -69,6 +69,7 @@ int main(int argc, char *argv[])
     while(true)
     {
         // Print current state of each device
+        /*
         for(auto const& entry : g_device_info)
         {
             auto info = entry.second;
@@ -90,8 +91,25 @@ int main(int argc, char *argv[])
             std::cout << s1.str() << std::endl;
             std::cout << s2.str() << std::endl;
         }
+        */
+
+        /*
+        for(size_t i=0; i<get_device_count(); ++i)
+        {
+            auto info = get_device_information(i);
+            std::cout << fmt::format(
+                "{:30s} {} a={:d} b={:d} h={:d}",
+                info.name,
+                guid_to_string(info.device_guid),
+                info.axis_count,
+                info.button_count,
+                info.hat_count
+            ) << std::endl;
+        }
+        std::cout << "-------------" << std::endl;
+        */
         
-        SleepEx(1000, 0);
+        SleepEx(5000, 0);
     }
 
     return 0;
