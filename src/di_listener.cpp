@@ -339,7 +339,7 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
     // Detect and handle axis state changes
     for(size_t i=0; i<g_data_store.cache[guid].axis_count; ++i)
     {
-        auto axis_index = g_data_store.cache[guid].axis_data[i].axis_index;
+        auto axis_index = g_data_store.cache[guid].axis_map[i].axis_index;
         auto value = 0;
         if     (axis_index == 1) { value = state.lX; }
         else if(axis_index == 2) { value = state.lY; }
@@ -678,15 +678,15 @@ void initialize_device(GUID guid, std::string name)
     info.axis_count = 0;
     for(int i=0; i<8; ++i)
     {
-        info.axis_data[i].linear_index = 0;
-        info.axis_data[i].axis_index = 0;
+        info.axis_map[i].linear_index = 0;
+        info.axis_map[i].axis_index = 0;
     }
 
     auto axis_indices = used_axis_indices(guid);
     for(size_t i=0; i<axis_indices.size(); ++i)
     {
-        info.axis_data[i].linear_index = i+1;
-        info.axis_data[i].axis_index = axis_indices[i];
+        info.axis_map[i].linear_index = i+1;
+        info.axis_map[i].axis_index = axis_indices[i];
     }
 
     info.axis_count = capabilities.dwAxes;

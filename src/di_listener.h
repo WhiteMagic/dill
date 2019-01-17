@@ -76,7 +76,7 @@ struct JoystickInputData
  *
  * Stores the linear and axis index of a single axis.
  */
-struct AxisData
+struct AxisMap
 {
     DWORD                               linear_index;
     DWORD                               axis_index;
@@ -95,12 +95,11 @@ struct DeviceSummary
     DWORD                               vendor_id;
     DWORD                               product_id;
     DWORD                               joystick_id;
-    DeviceActionType                    action;
     char                                name[MAX_PATH];
     DWORD                               axis_count;
     DWORD                               button_count;
     DWORD                               hat_count;
-    AxisData                            axis_data[8];
+    AxisMap                             axis_map[8];
 };
 
 /**
