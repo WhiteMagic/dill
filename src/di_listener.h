@@ -334,9 +334,9 @@ extern "C"
      * \param index axis index to query
      * \return current axis value of the provided device and axis
      */
+    __declspec(dllexport)
     LONG get_axis(GUID guid, DWORD index);
 
-    __declspec(dllexport)
     /**
      * \brief Returns the state of a button on a given device.
      *
@@ -344,9 +344,9 @@ extern "C"
      * \param index the index of the button to query
      * \return current state of the queried button
      */
+    __declspec(dllexport)
     bool get_button(GUID guid, DWORD index);
 
-    __declspec(dllexport)
     /**
      * \brief Returns the state of a hat on a given device.
      *
@@ -354,5 +354,6 @@ extern "C"
      * \param index the index of the hat to query
      * \return current state of the queried hat
      */
+    __declspec(dllexport)
     LONG get_hat(GUID guid, DWORD index);
 }
