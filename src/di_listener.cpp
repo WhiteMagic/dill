@@ -1,5 +1,6 @@
 #include "di_listener.h"
 
+#include <iostream>
 #include <memory>
 #include <string.h>
 #include <sstream>
@@ -673,7 +674,6 @@ void initialize_device(GUID guid, std::string name)
     info.vendor_id = get_vendor_id(device, guid);
     info.product_id = get_product_id(device, guid);
     info.joystick_id = get_joystick_id(device, guid);
-    info.action = DeviceActionType::Connected;
     strcpy_s(info.name, MAX_PATH, name.c_str());
     info.axis_count = 0;
     for(int i=0; i<8; ++i)
@@ -879,13 +879,18 @@ void set_device_change_callback(DeviceChangeCallback cb)
     g_device_change_callback = cb;
 }
 
-DeviceSummary get_device_information(size_t index)
+DeviceSummary get_device_information_by_index(size_t index)
 {
     if(index < 0 || index >= g_data_store.active_guids.size())
     {
         return DeviceSummary();
     }
     auto guid = g_data_store.active_guids[index];
+    return get_device_information_by_guid(guid);
+}
+
+DeviceSummary get_device_information_by_guid(GUID guid)
+{
     if(g_data_store.cache.find(guid) == g_data_store.cache.end())
     {
         return DeviceSummary();
@@ -893,6 +898,7 @@ DeviceSummary get_device_information(size_t index)
 
     return g_data_store.cache[guid];
 }
+
 
 size_t get_device_count()
 {

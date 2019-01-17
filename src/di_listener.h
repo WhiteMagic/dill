@@ -308,7 +308,10 @@ extern "C"
      * \param DeviceSummary of the device with the provided index
      */
     __declspec(dllexport)
-    DeviceSummary get_device_information(size_t index);
+    DeviceSummary get_device_information_by_index(size_t index);
+
+    __declspec(dllexport)
+    DeviceSummary get_device_information_by_guid(GUID guid);
 
     /**
      * \brief Returns the number of available devices.
