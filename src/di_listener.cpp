@@ -714,7 +714,7 @@ void initialize_device(GUID guid, std::string name)
     g_data_store.cache[guid] = info;
     if(g_device_change_callback != nullptr && execute_callback)
     {
-        g_device_change_callback(info);
+        g_device_change_callback(info, DeviceActionType::Connected);
     }
 
     // Allow operating on the device
@@ -806,7 +806,6 @@ void enumerate_devices()
             di.device_guid = guid;
             strcpy_s(di.name, MAX_PATH, "Unknown");
         }
-        di.action = DeviceActionType::Disconnected;
 
         // Remove guid from list of active ones
         for(size_t i=0; i<g_data_store.active_guids.size(); ++i)
@@ -822,7 +821,7 @@ void enumerate_devices()
         
         if(g_device_change_callback != nullptr)
         {
-            g_device_change_callback(di);
+            g_device_change_callback(di, DeviceActionType::Disconnected);
         }
     }
 }

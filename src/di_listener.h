@@ -139,7 +139,7 @@ struct DeviceDataStore
 //! Callback for joystick value change events
 typedef void (*JoystickInputEventCallback)(JoystickInputData);
 //! Callback for device change events
-typedef void (*DeviceChangeCallback)(DeviceSummary);
+typedef void (*DeviceChangeCallback)(DeviceSummary, DeviceActionType);
 
 
 /**
