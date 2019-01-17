@@ -29,9 +29,9 @@ std::string type_to_str(JoystickInputType type)
     }
 }
 
-void device_change_callback(DeviceSummary info)
+void device_change_callback(DeviceSummary info, DeviceActionType action)
 {
-    if(info.action == DeviceActionType::Disconnected)
+    if(action == DeviceActionType::Disconnected)
     {
         std::cout << fmt::format(
             "{:12s}: {:30s} {}",
@@ -55,16 +55,22 @@ void device_change_callback(DeviceSummary info)
     for(size_t i=0; i<info.axis_count; ++i)
     {
         std::cout << ">> " << i << " "
-                  << info.axis_data[i].linear_index << " "
-                  << info.axis_data[i].axis_index << std::endl;
+                  << info.axis_map[i].linear_index << " "
+                  << info.axis_map[i].axis_index << std::endl;
     }
 }
 
 int main(int argc, char *argv[])
 {
     //set_input_event_callback(event_callback);
-    set_device_change_callback(device_change_callback);
+    //set_device_change_callback(device_change_callback);
     init();
+
+    for(size_t i=0; i<get_device_count(); ++i)
+    {
+        auto info = get_device_information_by_index(i);
+        std::cout << info.name << std::endl;
+    }
 
     while(true)
     {

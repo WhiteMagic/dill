@@ -38,9 +38,9 @@ void event_callback(JoystickInputData data)
         << std::endl;
 }
 
-void device_change_callback(DeviceSummary info)
+void device_change_callback(DeviceSummary info, DeviceActionType action)
 {
-    if(info.action == DeviceActionType::Disconnected)
+    if(action == DeviceActionType::Disconnected)
     {
         std::cout << fmt::format(
             "{:12s}: {:30s} {} {} {} {}",
@@ -51,20 +51,21 @@ void device_change_callback(DeviceSummary info)
             info.product_id,
             info.joystick_id
         ) << std::endl;
-        return;
     }
+    else if(action == DeviceActionType::Connected)
+    {
+        g_device_info[info.device_guid] = info;
 
-    g_device_info[info.device_guid] = info;
-
-    std::cout << fmt::format(
-        "{:12s}: {:30s} {} {:X} {:X} {}",
-        "Connected",
-        info.name,
-        guid_to_string(info.device_guid),
-        info.vendor_id,
-        info.product_id,
-        info.joystick_id
-    ) << std::endl;
+        std::cout << fmt::format(
+            "{:12s}: {:30s} {} {:X} {:X} {}",
+            "Connected",
+            info.name,
+            guid_to_string(info.device_guid),
+            info.vendor_id,
+            info.product_id,
+            info.joystick_id
+        ) << std::endl;
+    }
 }
 
 int main(int argc, char *argv[])
