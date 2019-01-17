@@ -899,6 +899,20 @@ size_t get_device_count()
     return g_data_store.active_guids.size();
 }
 
+bool device_exists(GUID guid)
+{
+    bool exists = false;
+    for(auto const& dev_guid : g_data_store.active_guids)
+    {
+        if(dev_guid == guid)
+        {
+            exists = true;
+        }
+    }
+
+    return exists;
+}
+
 LONG get_axis(GUID guid, DWORD index)
 {
     if(index < 1 || index > 8)

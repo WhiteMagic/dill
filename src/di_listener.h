@@ -319,6 +319,8 @@ extern "C"
     size_t get_device_count();
 
     __declspec(dllexport)
+    bool device_exists(GUID guid);
+
     /**
      * \brief Returns the current axis value.
      *
