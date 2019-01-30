@@ -185,7 +185,7 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         evt.value = data.dwData;
         g_data_store.state[guid].axis[evt.input_index] = evt.value;
 
-        logger->info(
+        logger->debug(
             "{}: Axis   {} value={}",
             guid_to_string(guid),
             evt.input_index,
@@ -199,7 +199,7 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         evt.value = data.dwData;
         g_data_store.state[guid].hat[evt.input_index] = evt.value;
 
-        logger->info(
+        logger->debug(
             "{}: Hat    {:d} direction={}",
             guid_to_string(guid),
             evt.input_index,
@@ -213,7 +213,7 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         evt.value = (data.dwData & 0x0080) == 0 ? 0 : 1;
         g_data_store.state[guid].button[evt.input_index] = evt.value == 0 ? false : true;
 
-        logger->info(
+        logger->debug(
             "{}: Button {:d} pressed={}",
             guid_to_string(guid),
             evt.input_index,
@@ -358,7 +358,7 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
             evt.value = value;
             g_data_store.state[guid].axis[axis_index] = value;
 
-            logger->info(
+            logger->debug(
                 "{}: Axis   {} value={}",
                 guid_to_string(guid),
                 axis_index,
@@ -383,7 +383,7 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
             evt.value = is_pressed;
             g_data_store.state[guid].button[evt.input_index] = is_pressed;
 
-            logger->info(
+            logger->debug(
                 "{}: Button {:d} pressed={}",
                 guid_to_string(guid),
                 evt.input_index,
@@ -412,7 +412,7 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
             evt.value = direction;
             g_data_store.state[guid].hat[evt.input_index] = evt.value;
 
-            logger->info(
+            logger->debug(
                 "{}: Hat    {:d} direction={}",
                 guid_to_string(guid),
                 evt.input_index,
