@@ -1,5 +1,5 @@
 cmake_minimum_required( VERSION 3.4 )
-project( DInput )
+project( DILL )
 
 set( CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin )
 set( CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib )
@@ -10,11 +10,11 @@ include_directories(
 	${CMAKE_SOURCE_DIR}/src
 )
 
-add_library( di_listener SHARED src/di_listener.cpp )
-target_link_libraries( di_listener dinput8 dxguid )
+add_library( dill SHARED src/dill.cpp )
+target_link_libraries( dill dinput8 dxguid )
 
 add_executable( example src/example.cpp )
-target_link_libraries( example di_listener )
+target_link_libraries( example dill )
 
 add_executable( example2 src/example2.cpp )
-target_link_libraries( example2 di_listener )
+target_link_libraries( example2 dill )
