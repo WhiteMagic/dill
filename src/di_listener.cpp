@@ -405,10 +405,10 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         {
             direction = -1;
         }
-        if(g_data_store.state[guid].hat[i] != direction)
+        if(g_data_store.state[guid].hat[i+1] != direction)
         {
             evt.input_type = JoystickInputType::Hat;
-            evt.input_index = static_cast<UINT8>(i);
+            evt.input_index = static_cast<UINT8>(i+1);
             evt.value = direction;
             g_data_store.state[guid].hat[evt.input_index] = evt.value;
 
