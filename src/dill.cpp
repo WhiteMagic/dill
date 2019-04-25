@@ -828,6 +828,8 @@ void enumerate_devices()
 
 BOOL init()
 {
+    logger->info("Initializing DILL v1.2");
+
     // Start joystick update loop thread
     g_joystick_thread = CreateThread(
             NULL,
