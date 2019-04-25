@@ -683,15 +683,59 @@ void initialize_device(GUID guid, std::string name)
     }
 
     auto axis_indices = used_axis_indices(guid);
+
+    // Do some error checking on axis counts
+    if(axis_indices.size() > 8)
+    {
+        logger->error(
+            "{} {}: Invalid number of axis reported, {} > 8",
+            info.name,
+            guid_to_string(info.device_guid),
+            axis_indices.size()
+        );
+        axis_indices.resize(8);
+    }
+    if(capabilities.dwAxes > 8)
+    {
+        logger->error(
+            "{} {}: Reports more then 8 axis, {}",
+            info.name,
+            guid_to_string(info.device_guid),
+            capabilities.dwAxes
+        );
+    }
+
     for(size_t i=0; i<axis_indices.size(); ++i)
     {
         info.axis_map[i].linear_index = i+1;
         info.axis_map[i].axis_index = axis_indices[i];
     }
 
+    // Enforce valid axis count
     info.axis_count = capabilities.dwAxes;
+    if(axis_indices.size() != capabilities.dwAxes)
+    {
+        info.axis_count = axis_indices.size();
+        logger->warn(
+            "{} {}: Overriding reported number of axes, reported={} listed={}",
+            info.name,
+            guid_to_string(info.device_guid),
+            capabilities.dwAxes,
+            axis_indices.size()
+        );
+    }
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
+
+    // Write device summary to debug file
+    logger->info("Device summary: {} {}", info.name,guid_to_string(guid));
+    logger->info("Axis={} Buttons={} Hats={}", info.axis_count, info.button_count, info.hat_count);
+    logger->info("Axis map");
+    for(auto const& entry : info.axis_map)
+    {
+        logger->info("  linear={} id={}", entry.linear_index, entry.axis_index);
+    }
+
 
     // Add device to list of active guids
     bool add_guid = true;
