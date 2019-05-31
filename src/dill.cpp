@@ -705,25 +705,69 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    for(size_t i=0; i<axis_indices.size(); ++i)
-    {
-        info.axis_map[i].linear_index = i+1;
-        info.axis_map[i].axis_index = axis_indices[i];
-    }
+    // Handle all the various ways in which device can misreport device axes information
+    // 1. dwAxes reports more then 8 axes simply discard dwAxes data an only use
+    //    axis_indices
+    // 2. dwAxes and axis_indices value disagree and dwAxes is > 0 and < 9 while
+    //    axis_info is empty, hope for the best and assume we have dwAxes linear
+    //    axes present and fix axis_information
 
-    // Enforce valid axis count
-    info.axis_count = capabilities.dwAxes;
+    // There is something wrong with the reported axis counts, many ways to
+    // fix the discrepancy.
     if(axis_indices.size() != capabilities.dwAxes)
     {
-        info.axis_count = axis_indices.size();
-        logger->warn(
-            "{} {}: Overriding reported number of axes, reported={} listed={}",
-            info.name,
-            guid_to_string(info.device_guid),
-            capabilities.dwAxes,
-            axis_indices.size()
-        );
+        if(capabilities.dwAxes > 0 && capabilities.dwAxes < 9 && axis_indices.size() == 0)
+        {
+            // No axis map data enumerated but valid looking axis count reported, lets
+            // hope these are all one after the other
+            info.axis_count = capabilities.dwAxes;
+            for(size_t i=0; i<info.axis_count; ++i)
+            {
+                info.axis_map[i].linear_index = i+1;
+                info.axis_map[i].axis_index = i+1;
+            }
+
+            logger->warn(
+                "{} {}: Axis information, invalid hoping for the best, capabilities={} enumerated={}",
+                info.name,
+                guid_to_string(info.device_guid),
+                capabilities.dwAxes,
+                axis_indices.size()
+            );
+        }
+
+        else
+        {
+            // Some other invalid axis count information returned, simply trust the
+            // axis enumeration
+            info.axis_count = axis_indices.size();
+            for(size_t i=0; i<axis_indices.size(); ++i)
+            {
+                info.axis_map[i].linear_index = i+1;
+                info.axis_map[i].axis_index = axis_indices[i];
+            }
+            logger->warn(
+                "{} {}: Overriding reported number of axes,  capabilities={} enumerated={}",
+                info.name,
+                guid_to_string(info.device_guid),
+                capabilities.dwAxes,
+                axis_indices.size()
+            );
+        }
+
     }
+    // Both axis counts agree, so we'll just use those
+    else
+    {
+        info.axis_count = capabilities.dwAxes;
+        for(size_t i=0; i<axis_indices.size(); ++i)
+        {
+            info.axis_map[i].linear_index = i+1;
+            info.axis_map[i].axis_index = axis_indices[i];
+        }
+    }
+
+
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
 
@@ -872,7 +916,7 @@ void enumerate_devices()
 
 BOOL init()
 {
-    logger->info("Initializing DILL v1.2");
+    logger->info("Initializing DILL v1.3");
 
     // Start joystick update loop thread
     g_joystick_thread = CreateThread(
