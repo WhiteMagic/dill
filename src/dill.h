@@ -131,8 +131,6 @@ struct DeviceDataStore
     std::unordered_map<GUID, bool> is_ready;
     //! List of active GUIDs
     std::vector<GUID> active_guids;
-    //! Mutex synchronizing access to the members
-    std::mutex mutex;
 };
 
 

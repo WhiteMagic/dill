@@ -39,7 +39,7 @@ DeviceChangeCallback g_device_change_callback = nullptr;
 HANDLE g_message_thread = NULL;
 HANDLE g_joystick_thread = NULL;
 
-// State indicator
+// Flag indicating whether or not device initialization is complete
 std::atomic<bool> g_initialization_done = false;
 
 
@@ -437,7 +437,6 @@ DWORD WINAPI joystick_update_thread(LPVOID l_param)
     {
         if(g_initialization_done)
         {
-            std::lock_guard<std::mutex> lock(g_data_store.mutex);
             for(auto & entry : g_data_store.device_map)
             {
                 if(!g_data_store.is_ready[entry.first])
@@ -591,10 +590,7 @@ void initialize_device(GUID guid, std::string name)
     }
 
     // Store device in the data storage
-    {
-        std::lock_guard<std::mutex> lock(g_data_store.mutex);
-        g_data_store.device_map[guid] = device;
-    }
+    g_data_store.device_map[guid] = device;
 
     // Setting cooperation level
     result = device->SetCooperativeLevel(
@@ -874,7 +870,6 @@ void enumerate_devices()
     }
 
     // Get rid of devices we no longer have from the global map
-    std::lock_guard<std::mutex> lock(g_data_store.mutex);
     std::vector<GUID> guid_to_remove;
     for(auto const& entry : g_data_store.device_map)
     {
