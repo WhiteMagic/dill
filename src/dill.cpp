@@ -1,5 +1,6 @@
 #include "dill.h"
 
+#include <atomic>
 #include <iostream>
 #include <memory>
 #include <string.h>
@@ -37,6 +38,9 @@ DeviceChangeCallback g_device_change_callback = nullptr;
 // Thread handles
 HANDLE g_message_thread = NULL;
 HANDLE g_joystick_thread = NULL;
+
+// State indicator
+std::atomic<bool> g_initialization_done = false;
 
 
 DeviceState::DeviceState()
@@ -431,6 +435,7 @@ DWORD WINAPI joystick_update_thread(LPVOID l_param)
 {
     while(true)
     {
+        if(g_initialization_done)
         {
             std::lock_guard<std::mutex> lock(g_data_store.mutex);
             for(auto & entry : g_data_store.device_map)
@@ -552,7 +557,6 @@ void initialize_device(GUID guid, std::string name)
     // Check if we have an existing instance in the device map
     auto execute_callback = true;
     {
-        std::lock_guard<std::mutex> lock(g_data_store.mutex);
         if(g_data_store.device_map.find(guid) != g_data_store.device_map.end())
         {
             execute_callback = false;
@@ -834,6 +838,8 @@ BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data)
 
 void enumerate_devices()
 {
+    g_initialization_done = false;
+
     // Register with the DirectInput system, creating an instance to
     // interface with it
     if(g_direct_input == nullptr)
@@ -912,11 +918,14 @@ void enumerate_devices()
             g_device_change_callback(di, DeviceActionType::Disconnected);
         }
     }
+
+    g_initialization_done = true;
 }
 
 BOOL init()
 {
     logger->info("Initializing DILL v1.3");
+    g_initialization_done = false;
 
     // Start joystick update loop thread
     g_joystick_thread = CreateThread(
@@ -953,6 +962,7 @@ BOOL init()
 
     // Force an update of device enumeration to bootstrap everything
     enumerate_devices();
+    g_initialization_done = true;
 
     return TRUE;
 }
