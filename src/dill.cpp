@@ -92,6 +92,7 @@ std::string guid_to_string(GUID guid)
 
     std::wstring unicode_string(guid_string);
     CoTaskMemFree(guid_string);
+
     return std::string(unicode_string.begin(), unicode_string.end());
 }
 
@@ -907,7 +908,7 @@ void enumerate_devices()
                 break;
             }
         }
-        
+ 
         if(g_device_change_callback != nullptr)
         {
             g_device_change_callback(di, DeviceActionType::Disconnected);
@@ -919,8 +920,11 @@ void enumerate_devices()
 
 BOOL init()
 {
-    logger->info("Initializing DILL v1.3");
     g_initialization_done = false;
+    logger->info("Initializing DILL v1.3");
+    
+    // Force an update of device enumeration to bootstrap everything
+    enumerate_devices();
 
     // Start joystick update loop thread
     g_joystick_thread = CreateThread(
@@ -955,10 +959,7 @@ BOOL init()
         return FALSE;
     }
 
-    // Force an update of device enumeration to bootstrap everything
-    enumerate_devices();
     g_initialization_done = true;
-
     return TRUE;
 }
 
