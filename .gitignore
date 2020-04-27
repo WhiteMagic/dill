@@ -3,4 +3,5 @@
 *.sw[op]
 /bin
 /lib
+/out
 CMakeSettings.json
