@@ -189,13 +189,6 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         evt.input_index = axis_id_lookup[data.dwOfs];
         evt.value = data.dwData;
         g_data_store.state[guid].axis[evt.input_index] = evt.value;
-
-        logger->debug(
-            "{}: Axis   {} value={}",
-            guid_to_string(guid),
-            evt.input_index,
-            evt.value
-        );
     }
     else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgbButtons))
     {
@@ -203,13 +196,6 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         evt.input_index = hat_id_lookup[data.dwOfs];
         evt.value = data.dwData;
         g_data_store.state[guid].hat[evt.input_index] = evt.value;
-
-        logger->debug(
-            "{}: Hat    {:d} direction={}",
-            guid_to_string(guid),
-            evt.input_index,
-            evt.value
-        );
     }
     else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, lVX))
     {
@@ -217,13 +203,6 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         evt.input_index = static_cast<UINT8>(data.dwOfs - FIELD_OFFSET(DIJOYSTATE2, rgbButtons) + 1);
         evt.value = (data.dwData & 0x0080) == 0 ? 0 : 1;
         g_data_store.state[guid].button[evt.input_index] = evt.value == 0 ? false : true;
-
-        logger->debug(
-            "{}: Button {:d} pressed={}",
-            guid_to_string(guid),
-            evt.input_index,
-            evt.value
-        );
     }
     else
     {
@@ -363,13 +342,6 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
             evt.value = value;
             g_data_store.state[guid].axis[axis_index] = value;
 
-            logger->debug(
-                "{}: Axis   {} value={}",
-                guid_to_string(guid),
-                axis_index,
-                value
-            );
-
             if(g_event_callback != nullptr)
             {
                 g_event_callback(evt);
@@ -387,13 +359,6 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
             evt.input_index = static_cast<UINT8>(i + 1);
             evt.value = is_pressed;
             g_data_store.state[guid].button[evt.input_index] = is_pressed;
-
-            logger->debug(
-                "{}: Button {:d} pressed={}",
-                guid_to_string(guid),
-                evt.input_index,
-                evt.value
-            );
 
             if(g_event_callback != nullptr)
             {
@@ -416,13 +381,6 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
             evt.input_index = static_cast<UINT8>(i+1);
             evt.value = direction;
             g_data_store.state[guid].hat[evt.input_index] = evt.value;
-
-            logger->debug(
-                "{}: Hat    {:d} direction={}",
-                guid_to_string(guid),
-                evt.input_index,
-                evt.value
-            );
 
             if(g_event_callback != nullptr)
             {
