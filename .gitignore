@@ -5,3 +5,6 @@
 /lib
 /out
 CMakeSettings.json
+/src/python/__pycache__
+/debug.txt
+/python
