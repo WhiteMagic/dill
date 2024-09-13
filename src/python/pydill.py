@@ -532,7 +532,7 @@ class DILL:
 
     @staticmethod
     def set_device_change_callback(
-            callback: Callable[[DeviceSummary], None]
+            callback: Callable[[_DeviceSummary], None]
     ) -> None:
         """Sets the callback function to use for device change events.
 
