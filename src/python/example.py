@@ -22,7 +22,7 @@ class EventHandler:
                 f"Device GUID=s{summary.device_guid}, Vendor ID={summary.vendor_id}, Name={summary.name}"
             )
             print(
-                f"Device NumAxes={summary.axis_count}, NumButtons={summary.button_count}, NumHats={summary.hat_count}"
+                f"Device NumAxes={summary.axis_count}, NumButtons={summary.button_count}, NumHats={summary.hat_count}, Force Feedback={summary.force_feedback}"
             )
             for axis_i, axis_info in enumerate(summary.axis_map):
                 print(
