@@ -74,12 +74,14 @@ struct JoystickInputData
 /**
  * \brief Stores axis information.
  *
- * Stores the linear and axis index of a single axis.
+ * Stores the linear and axis index of a single axis, and FFB
+ * support (whether the axis has a force feedback actuator).
  */
 struct AxisMap
 {
     DWORD                               linear_index;
     DWORD                               axis_index;
+    bool                                ffb_supported;
 };
 
 /**
@@ -100,6 +102,7 @@ struct DeviceSummary
     DWORD                               button_count;
     DWORD                               hat_count;
     AxisMap                             axis_map[8];
+    bool                                force_feedback;
 };
 
 /**
@@ -225,6 +228,14 @@ BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data);
  * \brief Fill struct with things
  */
 BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef);
+
+/**
+ * \brief Enumerates axes that have a force feedback actuator.
+ * 
+ * See prototype DIEnumDeviceObjectsCallback. Expects the following dwFlags:
+ * DIDFT_AXIS | DIDFT_FFACTUATOR
+ */
+BOOL CALLBACK enumerate_ffb_axes_cb(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef);
 
 /**
  * \brief Enumerates all DirectInput devices present on the system.
