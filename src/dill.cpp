@@ -511,6 +511,14 @@ BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
     return DIENUM_CONTINUE;
 }
 
+BOOL CALLBACK enumerate_ffb_axes_cb(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
+{
+    DeviceSummary* device_summary = reinterpret_cast<DeviceSummary*>(pvRef);
+    int axis_i = g_axis_id_lookup[lpddoi->dwOfs] - 1;
+    device_summary->axis_map[axis_i].ffb_supported = true;
+    return DIENUM_CONTINUE;
+}
+
 void initialize_device(GUID guid, std::string name)
 {
     // Prevent any operations on this device until initialization is done
@@ -644,6 +652,7 @@ void initialize_device(GUID guid, std::string name)
     {
         info.axis_map[i].linear_index = 0;
         info.axis_map[i].axis_index = 0;
+        info.axis_map[i].ffb_supported = false;
     }
 
     auto axis_indices = used_axis_indices(guid);
@@ -731,6 +740,16 @@ void initialize_device(GUID guid, std::string name)
         }
     }
 
+    // Update map of force feedback capable axes.
+    result = device->EnumObjects(enumerate_ffb_axes_cb, &info, DIDFT_AXIS | DIDFT_FFACTUATOR);
+    if (FAILED(result))
+    {
+        logger->error(
+            "{}: Failed to obtain force feedback capable axes, {}",
+            guid_to_string(guid),
+            error_to_string(result)
+        );
+    }
 
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
