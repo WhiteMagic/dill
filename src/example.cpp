@@ -65,6 +65,13 @@ void device_change_callback(DeviceSummary info, DeviceActionType action)
             info.product_id,
             info.joystick_id
         ) << std::endl;
+		if (info.force_feedback) {
+			for (int i = 0; i < 8; ++i) {
+				if (info.axis_map[i].ffb_supported) {
+					std::cout << "Force feedback supported on axis " << i << std::endl;
+				}
+			}
+		}
     }
 }
 
