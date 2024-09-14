@@ -141,7 +141,8 @@ class _DeviceSummary(ctypes.Structure):
         ("axis_count", ctwt.DWORD),
         ("button_count", ctwt.DWORD),
         ("hat_count", ctwt.DWORD),
-        ("axis_map", _AxisMap * 8)
+        ("axis_map", _AxisMap * 8),
+        ("force_feedback", ctypes.c_bool),
     ]
 
 
@@ -405,6 +406,7 @@ class DeviceSummary:
         self.axis_map = []
         for i in range(8):
             self.axis_map.append(AxisMap(data.axis_map[i]))
+        self.force_feedback = data.force_feedback
         self.vjoy_id = -1
 
     @property
