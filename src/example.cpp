@@ -65,6 +65,9 @@ void device_change_callback(DeviceSummary info, DeviceActionType action)
             info.product_id,
             info.joystick_id
         ) << std::endl;
+        if (info.force_feedback) {
+            std::cout << "Force feedback supported" << std::endl;
+        }
     }
 }
 

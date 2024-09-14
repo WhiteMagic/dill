@@ -633,6 +633,7 @@ void initialize_device(GUID guid, std::string name)
     info.vendor_id = get_vendor_id(device, guid);
     info.product_id = get_product_id(device, guid);
     info.joystick_id = get_joystick_id(device, guid);
+    info.force_feedback = (bool)(capabilities.dwFlags & DIDC_FORCEFEEDBACK);
     strcpy_s(info.name, MAX_PATH, name.c_str());
     info.axis_count = 0;
     for(int i=0; i<8; ++i)

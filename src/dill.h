@@ -100,6 +100,7 @@ struct DeviceSummary
     DWORD                               button_count;
     DWORD                               hat_count;
     AxisMap                             axis_map[8];
+    bool                                force_feedback;
 };
 
 /**
