@@ -124,7 +124,8 @@ class _AxisMap(ctypes.Structure):
 
     _fields_ = [
         ("linear_index", ctwt.DWORD),
-        ("axis_index", ctwt.DWORD)
+        ("axis_index", ctwt.DWORD),
+        ("ffb_supported", ctypes.c_bool),
     ]
 
 
@@ -380,6 +381,7 @@ class AxisMap:
         """
         self.linear_index = data.linear_index
         self.axis_index = data.axis_index
+        self.ffb_supported = data.ffb_supported
 
 
 class DeviceSummary:

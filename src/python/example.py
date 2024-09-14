@@ -25,8 +25,10 @@ class EventHandler:
                 f"Device NumAxes={summary.axis_count}, NumButtons={summary.button_count}, NumHats={summary.hat_count}, Force Feedback={summary.force_feedback}"
             )
             for axis_i, axis_info in enumerate(summary.axis_map):
+                if axis_i >= summary.axis_count:
+                    break
                 print(
-                    f"Axis {axis_i} LinearIndex={axis_info.linear_index}, AxisIndex={axis_info.axis_index}"
+                    f"Axis {axis_i} LinearIndex={axis_info.linear_index}, AxisIndex={axis_info.axis_index}, FFB={axis_info.ffb_supported}"
                 )
 
     def joystick_event_handler(self, data: dill._JoystickInputData) -> None:
