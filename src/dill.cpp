@@ -42,6 +42,21 @@ HANDLE g_joystick_thread = NULL;
 // Flag indicating whether or not device initialization is complete
 std::atomic<bool> g_initialization_done = false;
 
+// Maps axis offsets to axis number (1-indexed).
+// To get axis index in AxisMap, subtract 1.
+static std::unordered_map<DWORD, int> g_axis_id_lookup =
+{
+    {DIJOFS_X, 1},
+    {DIJOFS_Y, 2},
+    {DIJOFS_Z, 3},
+    {DIJOFS_RX, 4},
+    {DIJOFS_RY, 5},
+    {DIJOFS_RZ, 6},
+    {DIJOFS_SLIDER(0), 7},
+    {DIJOFS_SLIDER(1), 8}
+};
+
+
 
 DeviceState::DeviceState()
     :   axis(9, 0)
@@ -163,17 +178,6 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
     JoystickInputData evt;
     evt.device_guid = guid;
 
-    static std::unordered_map<DWORD, int> axis_id_lookup =
-    {
-        {FIELD_OFFSET(DIJOYSTATE2, lX), 1},
-        {FIELD_OFFSET(DIJOYSTATE2, lY), 2},
-        {FIELD_OFFSET(DIJOYSTATE2, lZ), 3},
-        {FIELD_OFFSET(DIJOYSTATE2, lRx), 4},
-        {FIELD_OFFSET(DIJOYSTATE2, lRy), 5},
-        {FIELD_OFFSET(DIJOYSTATE2, lRz), 6},
-        {FIELD_OFFSET(DIJOYSTATE2, rglSlider[0]), 7},
-        {FIELD_OFFSET(DIJOYSTATE2, rglSlider[1]), 8}
-    };
     static std::unordered_map<DWORD, int> hat_id_lookup = 
     {
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[0]), 1},
@@ -186,7 +190,7 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
     if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgdwPOV))
     {
         evt.input_type = JoystickInputType::Axis;
-        evt.input_index = axis_id_lookup[data.dwOfs];
+        evt.input_index = g_axis_id_lookup[data.dwOfs];
         evt.value = data.dwData;
         g_data_store.state[guid].axis[evt.input_index] = evt.value;
     }
