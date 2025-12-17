@@ -12,12 +12,13 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#define FMT_UNICODE 0
 
 namespace std
 {
     template<> struct hash<GUID>
     {
-        /** 
+        /**
          * \brief Hash computation for GUID instances.
          *
          * This has is intended for use with std::unordered_map and as such
