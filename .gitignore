@@ -2,6 +2,7 @@
 *~
 *.sw[op]
 /bin
+/build
 /lib
 /out
 CMakeSettings.json
