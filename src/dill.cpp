@@ -7,7 +7,8 @@
 #include <sstream>
 
 #include "spdlog/spdlog.h"
-#include "spdlog/sinks/stdout_color_sinks.h" 
+#include "spdlog/sinks/stdout_color_sinks.h"
+#include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/sinks/basic_file_sink.h"
 
 
@@ -19,8 +20,14 @@
 namespace spd = spdlog;
 
 // Setup logger
+static const int k_max_log_size = 1024 * 1024 * 2;
+auto fixed_size_sink = std::make_shared<spd::sinks::rotating_file_sink_mt>(
+    "dill_debug.log",
+    k_max_log_size,
+    /* rotated files count */ 1
+);
+auto logger = std::make_shared<spd::logger>("debug", fixed_size_sink);
 //auto logger = spd::stdout_color_mt("console");
-auto logger = spd::basic_logger_mt("debug", "debug.txt");
 
 // DirectInput system handle
 LPDIRECTINPUT8 g_direct_input = nullptr;
