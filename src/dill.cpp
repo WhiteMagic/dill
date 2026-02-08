@@ -13,6 +13,7 @@
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/sinks/basic_file_sink.h"
 
+#include "libguarded/cs_cow_guarded.h"
 #include "libguarded/cs_shared_guarded.h"
 
 
@@ -38,12 +39,12 @@ auto logger = std::make_shared<spd::logger>("debug", fixed_size_sink);
 lg::shared_guarded<LPDIRECTINPUT8, std::recursive_mutex> g_direct_input{nullptr};
 
 // Size of the device object read buffer
-static const int g_buffer_size = 64;
+static const int g_buffer_size = 256;
 
 // Storage for device data
-static lg::shared_guarded<std::unordered_map<GUID, DeviceState>> g_state_store{};
-static lg::shared_guarded<DeviceMetaDataStore> g_meta_data_store{};
-static lg::shared_guarded<std::unordered_map<GUID, DeviceSummary>> g_summary_store{};
+static lg::shared_guarded<std::unordered_map<GUID, DeviceState>, std::shared_mutex> g_state_store{};
+static lg::cow_guarded<DeviceMetaDataStore> g_meta_data_store{};
+static lg::shared_guarded<std::unordered_map<GUID, DeviceSummary>,  std::shared_mutex> g_summary_store{};
 
 // Callback handles
 JoystickInputEventCallback g_event_callback = nullptr;
@@ -617,7 +618,7 @@ void initialize_device(GUID guid, std::string name)
     prop_word.diph.dwHeaderSize = sizeof(DIPROPHEADER);
     prop_word.diph.dwObj = 0;
     prop_word.diph.dwHow = DIPH_DEVICE;
-    prop_word.dwData = 256;
+    prop_word.dwData = g_buffer_size;
     // By default assume the device supports buffered reading and revert
     // to polled upon failure
     (*handle_meta_store).is_buffered[guid] = true;
@@ -978,7 +979,7 @@ void set_device_change_callback(DeviceChangeCallback cb)
 
 DeviceSummary get_device_information_by_index(size_t index)
 {
-    auto meta_store_handle = g_meta_data_store.lock();
+    auto meta_store_handle = g_meta_data_store.lock_shared();
     if(index < 0 || index >= (*meta_store_handle).active_guids.size())
     {
         return DeviceSummary();
@@ -1001,13 +1002,13 @@ DeviceSummary get_device_information_by_guid(GUID guid)
 
 size_t get_device_count()
 {
-    return (*g_meta_data_store.lock()).active_guids.size();
+    return (*g_meta_data_store.lock_shared()).active_guids.size();
 }
 
 bool device_exists(GUID guid)
 {
     bool exists = false;
-    auto meta_store_handle = g_meta_data_store.lock();
+    auto meta_store_handle = g_meta_data_store.lock_shared();
     for(auto const& dev_guid : (*meta_store_handle).active_guids)
     {
         if(dev_guid == guid)
