@@ -220,7 +220,7 @@ HWND create_window();
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data);
 
 /**
- * \brief Fill struct with things
+ * \brief Fill struct with correct axis data.
  */
 BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef);
 
@@ -264,7 +264,7 @@ DWORD get_vendor_id(LPDIRECTINPUTDEVICE8 device, GUID guid);
 DWORD get_product_id(LPDIRECTINPUTDEVICE8 device, GUID guid);
 
 /**
- * \brief Returns the joystick id assigned by windows to the device.
+ * \brief Returns the joystick id assigned by Windows to the device.
  *
  * \param device pointer to the device
  * \param guid GUID of the device
