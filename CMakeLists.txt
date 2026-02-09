@@ -10,10 +10,6 @@ include_directories(
 	${CMAKE_SOURCE_DIR}/src
 )
 
-include_directories(
-    ${CMAKE_SOURCE_DIR/src/libguarded}
-)
-
 add_library( dill SHARED src/dill.cpp )
 target_link_libraries( dill dinput8 dxguid )
 

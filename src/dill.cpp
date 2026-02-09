@@ -45,7 +45,8 @@ static const int g_buffer_size = 256;
 // multi-threading issues.
 static lg::shared_guarded<
     std::unordered_map<GUID, DeviceState>, std::shared_mutex> g_state_store{};
-static lg::cow_guarded<DeviceMetaDataStore> g_meta_data_store{};
+static lg::shared_guarded<
+    DeviceMetaDataStore, std::shared_mutex> g_meta_data_store{};
 static lg::shared_guarded<
     std::unordered_map<GUID, DeviceSummary>,
     std::shared_mutex> g_summary_store{};
@@ -291,7 +292,7 @@ bool process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         else
         {
             logger->error(
-                "Failed to retrieve buffere data on device: {} - {}",
+                "Failed to retrieve buffered data on device: {} - {}",
                 guid_to_string(guid),
                 error_to_string(result)
             );
@@ -347,10 +348,8 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
     evt.device_guid = guid;
 
     // Lock required data stores.
-    auto state_handle = g_state_store.lock();
-    auto summary_handle = g_summary_store.lock();
-    auto device_summary = (*summary_handle)[guid];
-    auto device_state = (*state_handle)[guid];
+    auto const& device_summary = (*g_summary_store.lock_shared()).at(guid);
+    auto & device_state = (*g_state_store.lock())[guid];
 
     // Detect and handle axis state changes.
     for(size_t i=0; i<device_summary.axis_count; ++i)
@@ -447,7 +446,7 @@ DWORD WINAPI joystick_update_thread(LPVOID l_param)
                     );
                     if (requires_polling)
                     {
-                        (*meta_store_handle).is_buffered[entry.first] = true;
+                        (*meta_store_handle).is_buffered[entry.first] = false;
                     }
                 }
                 else
@@ -989,7 +988,7 @@ void set_device_change_callback(DeviceChangeCallback cb)
 DeviceSummary get_device_information_by_index(size_t index)
 {
     auto meta_store_handle = g_meta_data_store.lock_shared();
-    if(index < 0 || index >= (*meta_store_handle).active_guids.size())
+    if(index >= (*meta_store_handle).active_guids.size())
     {
         return DeviceSummary();
     }
@@ -1041,7 +1040,7 @@ LONG get_axis(GUID guid, DWORD index)
         return 0;
     }
 
-    return (*g_state_store.lock())[guid].axis[index];
+    return (*g_state_store.lock_shared()).at(guid).axis[index];
 }
 
 bool get_button(GUID guid, DWORD index)
@@ -1056,7 +1055,7 @@ bool get_button(GUID guid, DWORD index)
         return false;
     }
 
-    return (*g_state_store.lock())[guid].button[index];
+    return (*g_state_store.lock_shared()).at(guid).button[index];
 }
 
 LONG get_hat(GUID guid, DWORD index)
@@ -1071,7 +1070,7 @@ LONG get_hat(GUID guid, DWORD index)
         return -1;
     }
 
-    return (*g_state_store.lock())[guid].hat[index];
+    return (*g_state_store.lock_shared()).at(guid).hat[index];
 }
 
 std::vector<int> used_axis_indices(LPDIRECTINPUTDEVICE8 device)
