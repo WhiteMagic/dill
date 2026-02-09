@@ -3,6 +3,8 @@
 #include <atomic>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <string.h>
 #include <sstream>
 
@@ -11,15 +13,19 @@
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/sinks/basic_file_sink.h"
 
+#include "libguarded/cs_cow_guarded.h"
+#include "libguarded/cs_shared_guarded.h"
 
-#define HID_CLASSGUID {0x4d1e55b2, 0xf16f, 0x11cf,{ 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}}
+
+#define HID_CLASSGUID { 0x4d1e55b2, 0xf16f, 0x11cf, { 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30} }
 #define CLS_NAME TEXT("GremlinInputListener")
 #define HWND_MESSAGE ((HWND)-3)
 
 
 namespace spd = spdlog;
+namespace lg = libguarded;
 
-// Setup logger
+// Setup log file rotation to limit maximum file size used.
 static const int k_max_log_size = 1024 * 1024 * 2;
 auto fixed_size_sink = std::make_shared<spd::sinks::rotating_file_sink_mt>(
     "dill_debug.log",
@@ -29,27 +35,35 @@ auto fixed_size_sink = std::make_shared<spd::sinks::rotating_file_sink_mt>(
 auto logger = std::make_shared<spd::logger>("debug", fixed_size_sink);
 //auto logger = spd::stdout_color_mt("console");
 
-// DirectInput system handle
-LPDIRECTINPUT8 g_direct_input = nullptr;
+// DirectInput system handle.
+lg::shared_guarded<LPDIRECTINPUT8, std::recursive_mutex> g_direct_input{nullptr};
 
-// Size of the device object read buffer
-static const int g_buffer_size = 64;
+// Size of the device object read buffer.
+static const int g_buffer_size = 256;
 
-// Storage for device data
-static DeviceDataStore g_data_store;
+// Storage for device related data structures, wrapped in guards to prevent
+// multi-threading issues.
+static lg::shared_guarded<
+    std::unordered_map<GUID, DeviceState>, std::shared_mutex> g_state_store{};
+static lg::shared_guarded<
+    DeviceMetaDataStore, std::shared_mutex> g_meta_data_store{};
+static lg::shared_guarded<
+    std::unordered_map<GUID, DeviceSummary>,
+    std::shared_mutex> g_summary_store{};
 
-// Callback handles
+// Callback handles.
 JoystickInputEventCallback g_event_callback = nullptr;
 DeviceChangeCallback g_device_change_callback = nullptr;
 
-// Thread handles
+// Thread handles.
 HANDLE g_message_thread = NULL;
 HANDLE g_joystick_thread = NULL;
 
-// Flag indicating whether or not device initialization is complete
+// Flag indicating whether or not device initialization is complete.
 std::atomic<bool> g_initialization_done = false;
 
 
+// Default constructor for a DeviceState structure.
 DeviceState::DeviceState()
     :   axis(9, 0)
       , button(128, false)
@@ -146,17 +160,17 @@ BOOL on_device_change(LPARAM l_param, WPARAM w_param)
 
 LRESULT window_proc(HWND window_hdl, UINT msg_type, WPARAM w_param, LPARAM l_param)
 {
-    // Window has not yet been created
+    // Window has not yet been created.
     if(msg_type == WM_NCCREATE)
     {
         return true;
     }
-    // Create the window
+    // Create the window.
     else if(msg_type == WM_CREATE)
     {
         on_create_window(window_hdl, l_param);
     }
-    // Device change event
+    // Device change event.
     else if(msg_type == WM_DEVICECHANGE)
     {
         on_device_change(l_param, w_param);
@@ -181,7 +195,7 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         {FIELD_OFFSET(DIJOYSTATE2, rglSlider[0]), 7},
         {FIELD_OFFSET(DIJOYSTATE2, rglSlider[1]), 8}
     };
-    static std::unordered_map<DWORD, int> hat_id_lookup = 
+    static std::unordered_map<DWORD, int> hat_id_lookup =
     {
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[0]), 1},
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[1]), 2},
@@ -189,34 +203,37 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[3]), 4}
     };
 
-    // Figure out the type
-    if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgdwPOV))
     {
-        evt.input_type = JoystickInputType::Axis;
-        evt.input_index = axis_id_lookup[data.dwOfs];
-        evt.value = data.dwData;
-        g_data_store.state[guid].axis[evt.input_index] = evt.value;
-    }
-    else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgbButtons))
-    {
-        evt.input_type = JoystickInputType::Hat;
-        evt.input_index = hat_id_lookup[data.dwOfs];
-        evt.value = data.dwData;
-        g_data_store.state[guid].hat[evt.input_index] = evt.value;
-    }
-    else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, lVX))
-    {
-        evt.input_type = JoystickInputType::Button;
-        evt.input_index = static_cast<UINT8>(data.dwOfs - FIELD_OFFSET(DIJOYSTATE2, rgbButtons) + 1);
-        evt.value = (data.dwData & 0x0080) == 0 ? 0 : 1;
-        g_data_store.state[guid].button[evt.input_index] = evt.value == 0 ? false : true;
-    }
-    else
-    {
-        logger->warn(
-            "{}: Unexpected type of input event occurred",
-            guid_to_string(guid)
-        );
+        // Figure out the input type.
+        auto store_handle = g_state_store.lock();
+        if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgdwPOV))
+        {
+            evt.input_type = JoystickInputType::Axis;
+            evt.input_index = axis_id_lookup[data.dwOfs];
+            evt.value = data.dwData;
+            (*store_handle)[guid].axis[evt.input_index] = evt.value;
+        }
+        else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgbButtons))
+        {
+            evt.input_type = JoystickInputType::Hat;
+            evt.input_index = hat_id_lookup[data.dwOfs];
+            evt.value = data.dwData;
+            (*store_handle)[guid].hat[evt.input_index] = evt.value;
+        }
+        else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, lVX))
+        {
+            evt.input_type = JoystickInputType::Button;
+            evt.input_index = static_cast<UINT8>(data.dwOfs - FIELD_OFFSET(DIJOYSTATE2, rgbButtons) + 1);
+            evt.value = (data.dwData & 0x0080) == 0 ? 0 : 1;
+            (*store_handle)[guid].button[evt.input_index] = evt.value == 0 ? false : true;
+        }
+        else
+        {
+            logger->warn(
+                "{}: Unexpected type of input event occurred",
+                guid_to_string(guid)
+            );
+        }
     }
 
     if(g_event_callback != nullptr)
@@ -225,9 +242,9 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
     }
 }
 
-void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
+bool process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
 {
-    // Poll device to get things going
+    // Poll device to get things going.
     auto result = instance->Poll();
     if(FAILED(result))
     {
@@ -241,16 +258,17 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         instance->Poll();
     }
 
-    // Retrieve buffered data
-    DIDEVICEOBJECTDATA device_data[g_buffer_size]; 
+    // Retrieve buffered data.
+    DIDEVICEOBJECTDATA device_data[g_buffer_size];
     DWORD object_count = g_buffer_size;
 
+    bool device_requires_polling = false;
     while(object_count == g_buffer_size)
-    {    
-        auto result = instance->GetDeviceData( 
-            sizeof(DIDEVICEOBJECTDATA), 
-            device_data, 
-            &object_count, 
+    {
+        auto result = instance->GetDeviceData(
+            sizeof(DIDEVICEOBJECTDATA),
+            device_data,
+            &object_count,
             0
         );
         if(SUCCEEDED(result))
@@ -263,9 +281,9 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
                 }
             }
             if(result == DI_BUFFEROVERFLOW)
-            { 
+            {
                 logger->error(
-                    "{}: {}",
+                    "Buffer overflow on device: {} - {}",
                     guid_to_string(guid),
                     error_to_string(result)
                 );
@@ -274,14 +292,14 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         else
         {
             logger->error(
-                "{}: {}",
+                "Failed to retrieve buffered data on device: {} - {}",
                 guid_to_string(guid),
                 error_to_string(result)
             );
             object_count = 0;
 
             // If this failure arose due to buffered reading not being possible
-            // revert the device to polled mode
+            // revert the device to polled mode.
             if(result == DIERR_NOTBUFFERED)
             {
                 logger->error(
@@ -289,15 +307,16 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
                     guid_to_string(guid),
                     error_to_string(result)
                 );
-                g_data_store.is_buffered[guid] = false;
+                device_requires_polling = true;
             }
         }
     }
+    return device_requires_polling;
 }
 
 void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
 {
-    // Poll device to update internal state
+    // Poll device to update internal state.
     auto result = instance->Poll();
     if(FAILED(result))
     {
@@ -311,7 +330,7 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         instance->Poll();
     }
 
-    // Obtain device state
+    // Obtain device state.
     DIJOYSTATE2 state;
     result = instance->GetDeviceState(sizeof(DIJOYSTATE2), &state);
     if(FAILED(result))
@@ -324,14 +343,18 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         return;
     }
 
-    // Event structure to use with the callback
+    // Event structure to use with the callback.
     JoystickInputData evt;
     evt.device_guid = guid;
 
-    // Detect and handle axis state changes
-    for(size_t i=0; i<g_data_store.cache[guid].axis_count; ++i)
+    // Lock required data stores.
+    auto const& device_summary = (*g_summary_store.lock_shared()).at(guid);
+    auto & device_state = (*g_state_store.lock())[guid];
+
+    // Detect and handle axis state changes.
+    for(size_t i=0; i<device_summary.axis_count; ++i)
     {
-        auto axis_index = g_data_store.cache[guid].axis_map[i].axis_index;
+        auto axis_index = device_summary.axis_map[i].axis_index;
         auto value = 0;
         if     (axis_index == 1) { value = state.lX; }
         else if(axis_index == 2) { value = state.lY; }
@@ -342,12 +365,12 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         else if(axis_index == 7) { value = state.rglSlider[0]; }
         else if(axis_index == 8) { value = state.rglSlider[1]; }
 
-        if(g_data_store.state[guid].axis[axis_index] != value)
+        if(device_state.axis[axis_index] != value)
         {
             evt.input_type = JoystickInputType::Axis;
             evt.input_index = static_cast<UINT8>(axis_index);
             evt.value = value;
-            g_data_store.state[guid].axis[axis_index] = value;
+            device_state.axis[axis_index] = value;
 
             if(g_event_callback != nullptr)
             {
@@ -356,16 +379,16 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         }
     }
 
-    // Detect and handle button state changes
-    for(size_t i=0; i<g_data_store.cache[guid].button_count; ++i)
+    // Detect and handle button state changes.
+    for(size_t i=0; i<device_summary.button_count; ++i)
     {
         auto is_pressed = (state.rgbButtons[i] & 0x0080) == 0 ? false : true;
-        if(g_data_store.state[guid].button[i+1] != is_pressed)
+        if(device_state.button[i+1] != is_pressed)
         {
             evt.input_type = JoystickInputType::Button;
             evt.input_index = static_cast<UINT8>(i + 1);
             evt.value = is_pressed;
-            g_data_store.state[guid].button[evt.input_index] = is_pressed;
+            device_state.button[evt.input_index] = is_pressed;
 
             if(g_event_callback != nullptr)
             {
@@ -374,20 +397,20 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         }
     }
 
-    // Detect and handle hat state changes
-    for(size_t i=0; i<g_data_store.cache[guid].hat_count; ++i)
+    // Detect and handle hat state changes.
+    for(size_t i=0; i<device_summary.hat_count; ++i)
     {
         LONG direction = state.rgdwPOV[i];
         if(direction < 0 || direction > 36000)
         {
             direction = -1;
         }
-        if(g_data_store.state[guid].hat[i+1] != direction)
+        if(device_state.hat[i+1] != direction)
         {
             evt.input_type = JoystickInputType::Hat;
             evt.input_index = static_cast<UINT8>(i+1);
             evt.value = direction;
-            g_data_store.state[guid].hat[evt.input_index] = evt.value;
+            device_state.hat[evt.input_index] = evt.value;
 
             if(g_event_callback != nullptr)
             {
@@ -403,9 +426,10 @@ DWORD WINAPI joystick_update_thread(LPVOID l_param)
     {
         if(g_initialization_done)
         {
-            for(auto & entry : g_data_store.device_map)
+            auto meta_store_handle = g_meta_data_store.lock();
+            for(auto & entry : (*meta_store_handle).device_map)
             {
-                if(!g_data_store.is_ready[entry.first])
+                if(!(*meta_store_handle).is_ready[entry.first])
                 {
                     logger->info(
                         "Skipping device {}, not yet fully initialized",
@@ -414,9 +438,16 @@ DWORD WINAPI joystick_update_thread(LPVOID l_param)
                     continue;
                 }
 
-                if(g_data_store.is_buffered[entry.first])
+                if((*meta_store_handle).is_buffered[entry.first])
                 {
-                    process_buffered_events(entry.second, entry.first);
+                    auto requires_polling = process_buffered_events(
+                        entry.second,
+                        entry.first
+                    );
+                    if (requires_polling)
+                    {
+                        (*meta_store_handle).is_buffered[entry.first] = false;
+                    }
                 }
                 else
                 {
@@ -432,7 +463,7 @@ DWORD WINAPI joystick_update_thread(LPVOID l_param)
 
 DWORD WINAPI message_handler_thread(LPVOID l_param)
 {
-    // Initialize the window to receive messages through
+    // Initialize the window to receive messages through.
     HWND hWnd = create_window();
     if(hWnd == NULL)
     {
@@ -440,7 +471,7 @@ DWORD WINAPI message_handler_thread(LPVOID l_param)
         throw std::runtime_error("Could not create message window!");
     }
 
-    // Start the message loop
+    // Start the message loop.
     MSG msg;
     while(GetMessage(&msg, NULL, 0, 0))
     {
@@ -516,16 +547,19 @@ BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
 
 void initialize_device(GUID guid, std::string name)
 {
-    // Prevent any operations on this device until initialization is done
-    g_data_store.is_ready[guid] = false;
+    // Acquire meta information database lock.
+    auto handle_meta_store = g_meta_data_store.lock();
 
-    // Check if we have an existing instance in the device map
+    // Prevent any operations on this device until initialization is done.
+    (*handle_meta_store).is_ready[guid] = false;
+
+    // Check if we have an existing instance in the device map.
     auto execute_callback = true;
     {
-        if(g_data_store.device_map.find(guid) != g_data_store.device_map.end())
+        if((*handle_meta_store).device_map.find(guid) != (*handle_meta_store).device_map.end())
         {
             execute_callback = false;
-            auto device = g_data_store.device_map[guid];
+            auto device = (*handle_meta_store).device_map[guid];
             auto result = device->Unacquire();
             if(FAILED(result))
             {
@@ -535,13 +569,14 @@ void initialize_device(GUID guid, std::string name)
                     error_to_string(result)
                 );
             }
-            g_data_store.device_map.erase(guid);
+            (*handle_meta_store).device_map.erase(guid);
         }
     }
 
-    // Create joystick device
+    // Create joystick device.
     LPDIRECTINPUTDEVICE8 device = nullptr;
-    auto result = g_direct_input->CreateDevice(
+    auto di_handle = g_direct_input.lock();
+    auto result = (*di_handle)->CreateDevice(
         guid,
         &device,
         nullptr
@@ -555,10 +590,10 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    // Store device in the data storage
-    g_data_store.device_map[guid] = device;
+    // Store device in the data storage.
+    (*handle_meta_store).device_map[guid] = device;
 
-    // Setting cooperation level
+    // Setting cooperation level.
     result = device->SetCooperativeLevel(
         NULL,
         DISCL_NONEXCLUSIVE | DISCL_BACKGROUND
@@ -572,7 +607,7 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    // Set data format for reports
+    // Set data format for reports.
     result = device->SetDataFormat(&c_dfDIJoystick2);
     if(FAILED(result))
     {
@@ -582,20 +617,19 @@ void initialize_device(GUID guid, std::string name)
             error_to_string(result)
         );
     }
- 
-    // Set device buffer size property
+
+    // Set device buffer size property.
     DIPROPDWORD prop_word;
-    DIPROPHEADER prop_header;
-    prop_header.dwSize = sizeof(DIPROPDWORD);
-    prop_header.dwHeaderSize = sizeof(DIPROPHEADER);
-    prop_header.dwObj = 0;
-    prop_header.dwHow = DIPH_DEVICE;
-    prop_word.diph = prop_header;
+    ZeroMemory(&prop_word, sizeof(DIPROPDWORD));
+    prop_word.diph.dwSize = sizeof(DIPROPDWORD);
+    prop_word.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    prop_word.diph.dwObj = 0;
+    prop_word.diph.dwHow = DIPH_DEVICE;
     prop_word.dwData = g_buffer_size;
     // By default assume the device supports buffered reading and revert
-    // to polled upon failure
-    g_data_store.is_buffered[guid] = true;
-    result = device->SetProperty(DIPROP_BUFFERSIZE, &prop_header);
+    // to polled upon failure.
+    (*handle_meta_store).is_buffered[guid] = true;
+    result = device->SetProperty(DIPROP_BUFFERSIZE, &prop_word.diph);
     if(FAILED(result))
     {
         logger->error(
@@ -607,10 +641,10 @@ void initialize_device(GUID guid, std::string name)
     if(result == DI_POLLEDDEVICE)
     {
         logger->warn("Device {} is not buffered", guid_to_string(guid));
-        g_data_store.is_buffered[guid] = false;
+        (*handle_meta_store).is_buffered[guid] = false;
     }
 
-    // Acquire device
+    // Acquire device.
     result = device->Acquire();
     if(FAILED(result))
     {
@@ -621,7 +655,7 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    // Query device capabilities
+    // Query device capabilities.
     DIDEVCAPS capabilities;
     capabilities.dwSize = sizeof(DIDEVCAPS);
     result = device->GetCapabilities(&capabilities);
@@ -634,7 +668,7 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    // Create device summary report
+    // Create device summary report.
     DeviceSummary info;
     info.device_guid = guid;
     info.vendor_id = get_vendor_id(device, guid);
@@ -648,9 +682,9 @@ void initialize_device(GUID guid, std::string name)
         info.axis_map[i].axis_index = 0;
     }
 
-    auto axis_indices = used_axis_indices(guid);
+    auto axis_indices = used_axis_indices(device);
 
-    // Do some error checking on axis counts
+    // Do some error checking on axis counts.
     if(axis_indices.size() > 8)
     {
         logger->error(
@@ -671,12 +705,13 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    // Handle all the various ways in which device can misreport device axes information
+    // Handle all the various ways in which device can misreport device axes
+    // information.
     // 1. dwAxes reports more then 8 axes simply discard dwAxes data an only use
-    //    axis_indices
+    //    axis_indices.
     // 2. dwAxes and axis_indices value disagree and dwAxes is > 0 and < 9 while
     //    axis_info is empty, hope for the best and assume we have dwAxes linear
-    //    axes present and fix axis_information
+    //    axes present and fix axis_information.
 
     // There is something wrong with the reported axis counts, many ways to
     // fix the discrepancy.
@@ -684,8 +719,8 @@ void initialize_device(GUID guid, std::string name)
     {
         if(capabilities.dwAxes > 0 && capabilities.dwAxes < 9 && axis_indices.size() == 0)
         {
-            // No axis map data enumerated but valid looking axis count reported, lets
-            // hope these are all one after the other
+            // No axis map data enumerated but valid looking axis count
+            // reported, lets hope these are all one after the other.
             info.axis_count = capabilities.dwAxes;
             for(size_t i=0; i<info.axis_count; ++i)
             {
@@ -704,8 +739,8 @@ void initialize_device(GUID guid, std::string name)
 
         else
         {
-            // Some other invalid axis count information returned, simply trust the
-            // axis enumeration
+            // Some other invalid axis count information returned, simply trust
+            // the axis enumeration.
             info.axis_count = axis_indices.size();
             for(size_t i=0; i<axis_indices.size(); ++i)
             {
@@ -722,7 +757,7 @@ void initialize_device(GUID guid, std::string name)
         }
 
     }
-    // Both axis counts agree, so we'll just use those
+    // Both axis counts agree, so we'll just use those.
     else
     {
         info.axis_count = capabilities.dwAxes;
@@ -737,7 +772,7 @@ void initialize_device(GUID guid, std::string name)
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
 
-    // Write device summary to debug file
+    // Write device summary to debug file.
     logger->info("Device summary: {} {}", info.name,guid_to_string(guid));
     logger->info("Axis={} Buttons={} Hats={}", info.axis_count, info.button_count, info.hat_count);
     logger->info("Axis map");
@@ -747,11 +782,11 @@ void initialize_device(GUID guid, std::string name)
     }
 
 
-    // Add device to list of active guids
+    // Add device to list of active guids.
     bool add_guid = true;
-    for(size_t i=0; i<g_data_store.active_guids.size(); ++i)
+    for(size_t i=0; i<(*handle_meta_store).active_guids.size(); ++i)
     {
-        if(g_data_store.active_guids[i] == guid)
+        if((*handle_meta_store).active_guids[i] == guid)
         {
             add_guid = false;
             break;
@@ -759,26 +794,29 @@ void initialize_device(GUID guid, std::string name)
     }
     if(add_guid)
     {
-        g_data_store.active_guids.push_back(guid);
+        (*handle_meta_store).active_guids.push_back(guid);
     }
 
-    // Set the axis range for each axis of the device
+    // Set the axis range for each axis of the device.
     device->EnumObjects(set_axis_range, device, DIDFT_ALL);
 
-    g_data_store.cache[guid] = info;
+    {
+        auto handle_summary_store = g_summary_store.lock();
+        (*handle_summary_store)[guid] = info;
+    }
     if(g_device_change_callback != nullptr && execute_callback)
     {
         g_device_change_callback(info, DeviceActionType::Connected);
     }
 
-    // Allow operating on the device
-    g_data_store.is_ready[guid] = true;
+    // Allow operating on the device.
+    (*handle_meta_store).is_ready[guid] = true;
 }
 
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data)
 {
-    // Convert user data pointer to data storage device
-    std::unordered_map<GUID, bool>* current_devices = 
+    // Convert user data pointer to data storage device.
+    std::unordered_map<GUID, bool>* current_devices =
         reinterpret_cast<std::unordered_map<GUID, bool>*>(data);
 
     logger->info(
@@ -787,30 +825,34 @@ BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data)
         std::string(instance->tszProductName)
     );
 
-    // Aggregate device information
+    // Aggregate device information.
     (*current_devices)[instance->guidInstance] = true;
     initialize_device(
         instance->guidInstance,
         std::string(instance->tszInstanceName)
     );
 
-    // Continue to enumerate devices
+    // Continue to enumerate devices.
     return DIENUM_CONTINUE;
 }
 
 void enumerate_devices()
 {
     g_initialization_done = false;
+    std::unordered_map<GUID, bool> current_devices;
 
-    // Register with the DirectInput system, creating an instance to
-    // interface with it
-    if(g_direct_input == nullptr)
     {
+    // Register with the DirectInput system, creating an instance to
+    // interface with it.
+    auto di_handle = g_direct_input.lock();
+    if(*di_handle == nullptr)
+    {
+        LPDIRECTINPUT8 tmp_device = nullptr;
         auto result = DirectInput8Create(
             GetModuleHandle(nullptr),
             DIRECTINPUT_VERSION,
             IID_IDirectInput8,
-            (VOID**)&g_direct_input,
+            (VOID**)&tmp_device,
             nullptr
         );
         if(FAILED(result))
@@ -821,10 +863,10 @@ void enumerate_devices()
             );
             throw std::runtime_error("Failed registering with DirectInput");
         }
+        *di_handle = tmp_device;
     }
 
-    std::unordered_map<GUID, bool> current_devices;
-    auto result = g_direct_input->EnumDevices(
+    auto result = (*di_handle)->EnumDevices(
         DI8DEVCLASS_GAMECTRL,
         handle_device_cb,
         &current_devices,
@@ -834,10 +876,13 @@ void enumerate_devices()
     {
         logger->error("Failure occured while discovering devices, {}", error_to_string(result));
     }
+    }
 
-    // Get rid of devices we no longer have from the global map
+    // Get rid of devices we no longer have from the global map.
     std::vector<GUID> guid_to_remove;
-    for(auto const& entry : g_data_store.device_map)
+    auto handle_meta_store = g_meta_data_store.lock();
+    auto handle_summary_store = g_summary_store.lock();
+    for(auto const& entry : (*handle_meta_store).device_map)
     {
         if(current_devices.find(entry.first) == current_devices.end())
         {
@@ -847,14 +892,14 @@ void enumerate_devices()
     for(auto const& guid : guid_to_remove)
     {
         logger->info("{}: Removing device", guid_to_string(guid));
-        g_data_store.device_map.erase(guid);
+        (*handle_meta_store).device_map.erase(guid);
 
         // Emit DeviceInformation, copy existing device data if we know about
-        // the device and have an existing record, otherwise return a shell
+        // the device and have an existing record, otherwise return a shell.
         DeviceSummary di;
-        if(g_data_store.cache.find(guid) != g_data_store.cache.end())
+        if(handle_summary_store->contains(guid))
         {
-            di = g_data_store.cache[guid];
+            di = (*handle_summary_store)[guid];
         }
         else
         {
@@ -862,18 +907,18 @@ void enumerate_devices()
             strcpy_s(di.name, MAX_PATH, "Unknown");
         }
 
-        // Remove guid from list of active ones
-        for(size_t i=0; i<g_data_store.active_guids.size(); ++i)
+        // Remove guid from list of active ones.
+        for(size_t i=0; i<(*handle_meta_store).active_guids.size(); ++i)
         {
-            if(g_data_store.active_guids[i] == guid)
+            if((*handle_meta_store).active_guids[i] == guid)
             {
-                g_data_store.active_guids.erase(
-                    g_data_store.active_guids.begin() + i
+                (*handle_meta_store).active_guids.erase(
+                    (*handle_meta_store).active_guids.begin() + i
                 );
                 break;
             }
         }
- 
+
         if(g_device_change_callback != nullptr)
         {
             g_device_change_callback(di, DeviceActionType::Disconnected);
@@ -886,12 +931,12 @@ void enumerate_devices()
 BOOL init()
 {
     g_initialization_done = false;
-    logger->info("Initializing DILL v1.3");
-    
-    // Force an update of device enumeration to bootstrap everything
+    logger->info("Initializing DILL v1.4");
+
+    // Force an update of device enumeration to bootstrap everything.
     enumerate_devices();
 
-    // Start joystick update loop thread
+    // Start joystick update loop thread.
     g_joystick_thread = CreateThread(
             NULL,
             0,
@@ -906,7 +951,7 @@ BOOL init()
         return FALSE;
     }
 
-    // Start joystick update loop thread
+    // Start joystick update loop thread.
     g_message_thread = CreateThread(
             NULL,
             0,
@@ -942,34 +987,37 @@ void set_device_change_callback(DeviceChangeCallback cb)
 
 DeviceSummary get_device_information_by_index(size_t index)
 {
-    if(index < 0 || index >= g_data_store.active_guids.size())
+    auto meta_store_handle = g_meta_data_store.lock_shared();
+    if(index >= (*meta_store_handle).active_guids.size())
     {
         return DeviceSummary();
     }
-    auto guid = g_data_store.active_guids[index];
+    auto guid = (*meta_store_handle).active_guids[index];
     return get_device_information_by_guid(guid);
 }
 
 DeviceSummary get_device_information_by_guid(GUID guid)
 {
-    if(g_data_store.cache.find(guid) == g_data_store.cache.end())
+    auto summary_handle = g_summary_store.lock();
+    if(summary_handle->find(guid) == summary_handle->end())
     {
         return DeviceSummary();
     }
 
-    return g_data_store.cache[guid];
+    return (*summary_handle)[guid];
 }
 
 
 size_t get_device_count()
 {
-    return g_data_store.active_guids.size();
+    return (*g_meta_data_store.lock_shared()).active_guids.size();
 }
 
 bool device_exists(GUID guid)
 {
     bool exists = false;
-    for(auto const& dev_guid : g_data_store.active_guids)
+    auto meta_store_handle = g_meta_data_store.lock_shared();
+    for(auto const& dev_guid : (*meta_store_handle).active_guids)
     {
         if(dev_guid == guid)
         {
@@ -992,7 +1040,7 @@ LONG get_axis(GUID guid, DWORD index)
         return 0;
     }
 
-    return g_data_store.state[guid].axis[index];
+    return (*g_state_store.lock_shared()).at(guid).axis[index];
 }
 
 bool get_button(GUID guid, DWORD index)
@@ -1007,7 +1055,7 @@ bool get_button(GUID guid, DWORD index)
         return false;
     }
 
-    return g_data_store.state[guid].button[index];
+    return (*g_state_store.lock_shared()).at(guid).button[index];
 }
 
 LONG get_hat(GUID guid, DWORD index)
@@ -1022,22 +1070,24 @@ LONG get_hat(GUID guid, DWORD index)
         return -1;
     }
 
-    return g_data_store.state[guid].hat[index];
+    return (*g_state_store.lock_shared()).at(guid).hat[index];
 }
 
-std::vector<int> used_axis_indices(GUID guid)
+std::vector<int> used_axis_indices(LPDIRECTINPUTDEVICE8 device)
 {
     DIJOYSTATE2 state;
-    g_data_store.device_map[guid]->Poll();
-    auto result = g_data_store.device_map[guid]->GetDeviceState(
-        sizeof(state),
-        &state
-    );
-
-    if(FAILED(result))
     {
-        logger->critical("Failed determining used axes indices.");
-        return {};
+        device->Poll();
+        auto result = device->GetDeviceState(
+            sizeof(state),
+            &state
+        );
+
+        if(FAILED(result))
+        {
+            logger->critical("Failed determining used axes indices.");
+            return {};
+        }
     }
 
     std::vector<int> used_indices;
