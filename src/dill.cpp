@@ -33,7 +33,7 @@ auto logger = std::make_shared<spd::logger>("debug", fixed_size_sink);
 LPDIRECTINPUT8 g_direct_input = nullptr;
 
 // Size of the device object read buffer
-static const int g_buffer_size = 64;
+static const int g_buffer_size = 256;
 
 // Storage for device data
 static DeviceDataStore g_data_store;
@@ -181,7 +181,7 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         {FIELD_OFFSET(DIJOYSTATE2, rglSlider[0]), 7},
         {FIELD_OFFSET(DIJOYSTATE2, rglSlider[1]), 8}
     };
-    static std::unordered_map<DWORD, int> hat_id_lookup = 
+    static std::unordered_map<DWORD, int> hat_id_lookup =
     {
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[0]), 1},
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[1]), 2},
@@ -242,15 +242,15 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
     }
 
     // Retrieve buffered data
-    DIDEVICEOBJECTDATA device_data[g_buffer_size]; 
+    DIDEVICEOBJECTDATA device_data[g_buffer_size];
     DWORD object_count = g_buffer_size;
 
     while(object_count == g_buffer_size)
-    {    
-        auto result = instance->GetDeviceData( 
-            sizeof(DIDEVICEOBJECTDATA), 
-            device_data, 
-            &object_count, 
+    {
+        auto result = instance->GetDeviceData(
+            sizeof(DIDEVICEOBJECTDATA),
+            device_data,
+            &object_count,
             0
         );
         if(SUCCEEDED(result))
@@ -263,9 +263,9 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
                 }
             }
             if(result == DI_BUFFEROVERFLOW)
-            { 
+            {
                 logger->error(
-                    "{}: {}",
+                    "Buffer overflow on device {} - {}",
                     guid_to_string(guid),
                     error_to_string(result)
                 );
@@ -582,20 +582,20 @@ void initialize_device(GUID guid, std::string name)
             error_to_string(result)
         );
     }
- 
+
     // Set device buffer size property
     DIPROPDWORD prop_word;
-    DIPROPHEADER prop_header;
-    prop_header.dwSize = sizeof(DIPROPDWORD);
-    prop_header.dwHeaderSize = sizeof(DIPROPHEADER);
-    prop_header.dwObj = 0;
-    prop_header.dwHow = DIPH_DEVICE;
-    prop_word.diph = prop_header;
+    ZeroMemory(&prop_word, sizeof(DIPROPDWORD));
+    prop_word.diph.dwSize = sizeof(DIPROPDWORD);
+    prop_word.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    prop_word.diph.dwObj = 0;
+    prop_word.diph.dwHow = DIPH_DEVICE;
     prop_word.dwData = g_buffer_size;
+
     // By default assume the device supports buffered reading and revert
     // to polled upon failure
     g_data_store.is_buffered[guid] = true;
-    result = device->SetProperty(DIPROP_BUFFERSIZE, &prop_header);
+    result = device->SetProperty(DIPROP_BUFFERSIZE, &prop_word.diph);
     if(FAILED(result))
     {
         logger->error(
@@ -778,7 +778,7 @@ void initialize_device(GUID guid, std::string name)
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data)
 {
     // Convert user data pointer to data storage device
-    std::unordered_map<GUID, bool>* current_devices = 
+    std::unordered_map<GUID, bool>* current_devices =
         reinterpret_cast<std::unordered_map<GUID, bool>*>(data);
 
     logger->info(
@@ -873,7 +873,7 @@ void enumerate_devices()
                 break;
             }
         }
- 
+
         if(g_device_change_callback != nullptr)
         {
             g_device_change_callback(di, DeviceActionType::Disconnected);
@@ -887,7 +887,7 @@ BOOL init()
 {
     g_initialization_done = false;
     logger->info("Initializing DILL v1.3");
-    
+
     // Force an update of device enumeration to bootstrap everything
     enumerate_devices();
 
