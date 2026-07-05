@@ -67,7 +67,7 @@ struct JoystickInputData
 {
     GUID                                device_guid;
     JoystickInputType                   input_type;
-    // In case of an axis this is the axis_index and not the linear_index.
+    // In case of an axis this is the axis_index and not the linear_index
     UINT8                               input_index;
     LONG                                value;
 };
@@ -118,22 +118,26 @@ struct DeviceState
 /**
  * \brief Holds information about devices and their state.
  */
-struct DeviceMetaDataStore
+struct DeviceDataStore
 {
-    //! Indicates whether or not a device is buffered.
-    std::unordered_map<GUID, bool> is_buffered;
-    //! Flag indicating whether or not the device is fully operational.
-    std::unordered_map<GUID, bool> is_ready;
-    //! List of active GUIDs.
-    std::vector<GUID> active_guids;
-    //! Maps from GUID to DirectInput device instance.
+    //! Maps from GUID to DirectInput device instance
     std::unordered_map<GUID, LPDIRECTINPUTDEVICE8> device_map;
+    //! Indicates whether or not a device is buffered
+    std::unordered_map<GUID, bool> is_buffered;
+    //! Caches DeviceSummary for devices
+    std::unordered_map<GUID, DeviceSummary> cache;
+    //! Last known state of the device
+    std::unordered_map<GUID, DeviceState> state;
+    //! Flag indicating whether or not the device is fully operational
+    std::unordered_map<GUID, bool> is_ready;
+    //! List of active GUIDs
+    std::vector<GUID> active_guids;
 };
 
 
-//! Callback for joystick value change events.
+//! Callback for joystick value change events
 typedef void (*JoystickInputEventCallback)(JoystickInputData);
-//! Callback for device change events.
+//! Callback for device change events
 typedef void (*DeviceChangeCallback)(DeviceSummary, DeviceActionType);
 
 
@@ -195,9 +199,8 @@ void emit_joystick_input_event(
  *
  * \param instance device instance holding the information
  * \param guid identifier of the device being updated
- * \return true if the device requires polling, false otherwise
  */
-bool process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid);
+void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid);
 
 /**
  * \brief Thread function handling joystick messages.
@@ -220,7 +223,7 @@ HWND create_window();
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data);
 
 /**
- * \brief Fill struct with correct axis data.
+ * \brief Fill struct with things
  */
 BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef);
 
@@ -240,10 +243,10 @@ void initialize_device(GUID guid, std::string name);
 /**
  * \brief Returns the indices of axes used by the device.
  *
- * \param device pointer to the device to query
+ * \param guid GUID of the device to return axes indices for
  * \return list of used axes indices
  */
-std::vector<int> used_axis_indices(LPDIRECTINPUTDEVICE8 device);
+std::vector<int> used_axis_indices(GUID guid);
 
 /**
  * \brief Returns the vendor id of the HID device.
@@ -264,7 +267,7 @@ DWORD get_vendor_id(LPDIRECTINPUTDEVICE8 device, GUID guid);
 DWORD get_product_id(LPDIRECTINPUTDEVICE8 device, GUID guid);
 
 /**
- * \brief Returns the joystick id assigned by Windows to the device.
+ * \brief Returns the joystick id assigned by windows to the device.
  *
  * \param device pointer to the device
  * \param guid GUID of the device
