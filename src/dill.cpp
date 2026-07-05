@@ -274,7 +274,7 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         else
         {
             logger->error(
-                "{}: {}",
+                "Failed to retrieve buffere data on device: {} - {}",
                 guid_to_string(guid),
                 error_to_string(result)
             );
