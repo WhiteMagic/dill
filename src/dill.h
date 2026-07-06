@@ -223,11 +223,6 @@ HWND create_window();
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data);
 
 /**
- * \brief Fill struct with things
- */
-BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef);
-
-/**
  * \brief Enumerates all DirectInput devices present on the system.
  */
 void enumerate_devices();
@@ -239,14 +234,6 @@ void enumerate_devices();
  * \param name name of the device being initialized
  */
 void initialize_device(GUID guid, std::string name);
-
-/**
- * \brief Returns the indices of axes used by the device.
- *
- * \param guid GUID of the device to return axes indices for
- * \return list of used axes indices
- */
-std::vector<int> used_axis_indices(GUID guid);
 
 /**
  * \brief Returns the vendor id of the HID device.

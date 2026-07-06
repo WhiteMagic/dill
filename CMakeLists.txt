@@ -14,7 +14,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR/src/libguarded}
 )
 
-add_library( dill SHARED src/dill.cpp )
+add_library( dill SHARED src/dill.cpp src/axis_mapping.cpp )
 target_link_libraries( dill dinput8 dxguid )
 
 add_executable( example src/example.cpp )
@@ -22,3 +22,4 @@ target_link_libraries( example dill )
 
 add_executable( example2 src/example2.cpp )
 target_link_libraries( example2 dill )
+

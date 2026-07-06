@@ -1,11 +1,13 @@
 #include "dill.h"
 
+#include <algorithm>
 #include <atomic>
 #include <iostream>
 #include <memory>
 #include <string.h>
 #include <sstream>
 
+#include "axis_mapping.h"
 #include "spdlog/spdlog.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "spdlog/sinks/rotating_file_sink.h"
@@ -48,6 +50,29 @@ HANDLE g_joystick_thread = NULL;
 
 // Flag indicating whether or not device initialization is complete
 std::atomic<bool> g_initialization_done = false;
+
+
+namespace
+{
+    // Context used with EnumObjects to manage axis detection.
+    struct AxisEnumContext
+    {
+        LPDIRECTINPUTDEVICE8        device;
+        DWORD                       slider_count;
+        std::vector<AxisOffset>     detected_offsets;
+    };
+
+    // Lookup table for axis GUID to EnumObject offsets.
+    const std::unordered_map<GUID, AxisOffset> g_axis_guid_lookup =
+    {
+        {GUID_XAxis,  DIJOFS_X},
+        {GUID_YAxis,  DIJOFS_Y},
+        {GUID_ZAxis,  DIJOFS_Z},
+        {GUID_RxAxis, DIJOFS_RX},
+        {GUID_RyAxis, DIJOFS_RY},
+        {GUID_RzAxis, DIJOFS_RZ},
+    };
+}
 
 
 DeviceState::DeviceState()
@@ -130,7 +155,8 @@ BOOL on_create_window(HWND window_hdl, LPARAM l_param)
 BOOL on_device_change(LPARAM l_param, WPARAM w_param)
 {
     PDEV_BROADCAST_HDR lpdb = reinterpret_cast<PDEV_BROADCAST_HDR>(l_param);
-    PDEV_BROADCAST_DEVICEINTERFACE lpdbv = reinterpret_cast<PDEV_BROADCAST_DEVICEINTERFACE>(lpdb);
+    PDEV_BROADCAST_DEVICEINTERFACE lpdbv =
+        reinterpret_cast<PDEV_BROADCAST_DEVICEINTERFACE>(lpdb);
     std::string path;
     if(lpdb->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
     {
@@ -144,7 +170,12 @@ BOOL on_device_change(LPARAM l_param, WPARAM w_param)
     return TRUE;
 }
 
-LRESULT window_proc(HWND window_hdl, UINT msg_type, WPARAM w_param, LPARAM l_param)
+LRESULT window_proc(
+    HWND                                window_hdl,
+    UINT                                msg_type,
+    WPARAM                              w_param,
+    LPARAM                              l_param
+)
 {
     // Window has not yet been created
     if(msg_type == WM_NCCREATE)
@@ -170,18 +201,7 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
     JoystickInputData evt;
     evt.device_guid = guid;
 
-    static std::unordered_map<DWORD, int> axis_id_lookup =
-    {
-        {FIELD_OFFSET(DIJOYSTATE2, lX), 1},
-        {FIELD_OFFSET(DIJOYSTATE2, lY), 2},
-        {FIELD_OFFSET(DIJOYSTATE2, lZ), 3},
-        {FIELD_OFFSET(DIJOYSTATE2, lRx), 4},
-        {FIELD_OFFSET(DIJOYSTATE2, lRy), 5},
-        {FIELD_OFFSET(DIJOYSTATE2, lRz), 6},
-        {FIELD_OFFSET(DIJOYSTATE2, rglSlider[0]), 7},
-        {FIELD_OFFSET(DIJOYSTATE2, rglSlider[1]), 8}
-    };
-    static std::unordered_map<DWORD, int> hat_id_lookup = 
+    static std::unordered_map<DWORD, int> hat_id_lookup =
     {
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[0]), 1},
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[1]), 2},
@@ -189,11 +209,11 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[3]), 4}
     };
 
-    // Figure out the type
+    // Figure out the event's input type.
     if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgdwPOV))
     {
         evt.input_type = JoystickInputType::Axis;
-        evt.input_index = axis_id_lookup[data.dwOfs];
+        evt.input_index = static_cast<UINT8>(axis_index_for_offset(data.dwOfs));
         evt.value = data.dwData;
         g_data_store.state[guid].axis[evt.input_index] = evt.value;
     }
@@ -207,9 +227,12 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
     else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, lVX))
     {
         evt.input_type = JoystickInputType::Button;
-        evt.input_index = static_cast<UINT8>(data.dwOfs - FIELD_OFFSET(DIJOYSTATE2, rgbButtons) + 1);
+        evt.input_index = static_cast<UINT8>(
+            data.dwOfs - FIELD_OFFSET(DIJOYSTATE2, rgbButtons) + 1
+        );
         evt.value = (data.dwData & 0x0080) == 0 ? 0 : 1;
-        g_data_store.state[guid].button[evt.input_index] = evt.value == 0 ? false : true;
+        g_data_store.state[guid].button[evt.input_index] =
+            evt.value == 0 ? false : true;
     }
     else
     {
@@ -242,15 +265,14 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
     }
 
     // Retrieve buffered data
-    DIDEVICEOBJECTDATA device_data[g_buffer_size]; 
+    DIDEVICEOBJECTDATA device_data[g_buffer_size];
     DWORD object_count = g_buffer_size;
-
     while(object_count == g_buffer_size)
-    {    
-        auto result = instance->GetDeviceData( 
-            sizeof(DIDEVICEOBJECTDATA), 
-            device_data, 
-            &object_count, 
+    {
+        auto result = instance->GetDeviceData(
+            sizeof(DIDEVICEOBJECTDATA),
+            device_data,
+            &object_count,
             0
         );
         if(SUCCEEDED(result))
@@ -263,7 +285,7 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
                 }
             }
             if(result == DI_BUFFEROVERFLOW)
-            { 
+            {
                 logger->error(
                     "{}: {}",
                     guid_to_string(guid),
@@ -285,7 +307,8 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
             if(result == DIERR_NOTBUFFERED)
             {
                 logger->error(
-                    "{} Failed reading device in buffered mode, falling back to polling, {}",
+                    "{} Failed reading device in buffered mode, falling back "
+                    "to polling, {}",
                     guid_to_string(guid),
                     error_to_string(result)
                 );
@@ -332,15 +355,10 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
     for(size_t i=0; i<g_data_store.cache[guid].axis_count; ++i)
     {
         auto axis_index = g_data_store.cache[guid].axis_map[i].axis_index;
-        auto value = 0;
-        if     (axis_index == 1) { value = state.lX; }
-        else if(axis_index == 2) { value = state.lY; }
-        else if(axis_index == 3) { value = state.lZ; }
-        else if(axis_index == 4) { value = state.lRx; }
-        else if(axis_index == 5) { value = state.lRy; }
-        else if(axis_index == 6) { value = state.lRz; }
-        else if(axis_index == 7) { value = state.rglSlider[0]; }
-        else if(axis_index == 8) { value = state.rglSlider[1]; }
+        auto offset = offset_for_axis_index(axis_index);
+        LONG value = *reinterpret_cast<LONG const*>(
+            reinterpret_cast<char const*>(&state) + offset
+        );
 
         if(g_data_store.state[guid].axis[axis_index] != value)
         {
@@ -486,31 +504,52 @@ HWND create_window()
     return window_hdl;
 }
 
-BOOL CALLBACK set_axis_range(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
+BOOL CALLBACK enumerate_axis_objects(
+    LPCDIDEVICEOBJECTINSTANCE       lpddoi,
+    LPVOID                          pvRef
+)
 {
-    LPDIRECTINPUTDEVICE8 device = reinterpret_cast<LPDIRECTINPUTDEVICE8>(pvRef);
-    if(lpddoi->dwType & DIDFT_AXIS)
+    AxisEnumContext* ctx = reinterpret_cast<AxisEnumContext*>(pvRef);
+
+    if(!(lpddoi->dwType & DIDFT_AXIS))
     {
-        DIPROPRANGE range;
+        return DIENUM_CONTINUE;
+    }
 
-        ZeroMemory(&range, sizeof(range));
-        range.diph.dwSize = sizeof(range);
-        range.diph.dwHeaderSize = sizeof(range.diph);
-        range.diph.dwObj = lpddoi->dwType;
-        range.diph.dwHow = DIPH_BYID;
-        range.lMin = -32768;
-        range.lMax = 32767;
+    DIPROPRANGE range;
+    ZeroMemory(&range, sizeof(range));
+    range.diph.dwSize = sizeof(range);
+    range.diph.dwHeaderSize = sizeof(range.diph);
+    range.diph.dwObj = lpddoi->dwType;
+    range.diph.dwHow = DIPH_BYID;
+    range.lMin = -32768;
+    range.lMax = 32767;
 
-        auto result = device->SetProperty(DIPROP_RANGE, &range.diph);
-        if(FAILED(result))
+    auto result = ctx->device->SetProperty(DIPROP_RANGE, &range.diph);
+    if(FAILED(result))
+    {
+        logger->error(
+            "Error while setting axis range, {}",
+            error_to_string(result)
+        );
+        return DIENUM_CONTINUE;
+    }
+
+    // Resolve GUID type to an index.
+    if(lpddoi->guidType == GUID_Slider)
+    {
+        ctx->detected_offsets.push_back(DIJOFS_SLIDER(ctx->slider_count));
+        ++ctx->slider_count;
+    }
+    else
+    {
+        const auto it = g_axis_guid_lookup.find(lpddoi->guidType);
+        if(it != g_axis_guid_lookup.end())
         {
-            logger->error(
-                "Error while setting axis range, {}",
-                error_to_string(result)
-            );
-            return DIENUM_CONTINUE;
+            ctx->detected_offsets.push_back(it->second);
         }
     }
+
     return DIENUM_CONTINUE;
 }
 
@@ -582,7 +621,7 @@ void initialize_device(GUID guid, std::string name)
             error_to_string(result)
         );
     }
- 
+
     // Set device buffer size property
     DIPROPDWORD prop_word;
     DIPROPHEADER prop_header;
@@ -641,105 +680,27 @@ void initialize_device(GUID guid, std::string name)
     info.product_id = get_product_id(device, guid);
     info.joystick_id = get_joystick_id(device, guid);
     strcpy_s(info.name, MAX_PATH, name.c_str());
-    info.axis_count = 0;
-    for(int i=0; i<8; ++i)
-    {
-        info.axis_map[i].linear_index = 0;
-        info.axis_map[i].axis_index = 0;
-    }
 
-    auto axis_indices = used_axis_indices(guid);
+    // Detect present axes via object enumeration and set each one's range
+    // in the same pass.
+    AxisEnumContext axis_ctx;
+    axis_ctx.device = device;
+    axis_ctx.slider_count = 0;
+    device->EnumObjects(enumerate_axis_objects, &axis_ctx, DIDFT_AXIS);
 
-    // Do some error checking on axis counts
-    if(axis_indices.size() > 8)
-    {
-        logger->error(
-            "{} {}: Invalid number of axis reported, {} > 8",
-            info.name,
-            guid_to_string(info.device_guid),
-            axis_indices.size()
-        );
-        axis_indices.resize(8);
-    }
-    if(capabilities.dwAxes > 8)
-    {
-        logger->error(
-            "{} {}: Reports more then 8 axis, {}",
-            info.name,
-            guid_to_string(info.device_guid),
-            capabilities.dwAxes
-        );
-    }
-
-    // Handle all the various ways in which device can misreport device axes information
-    // 1. dwAxes reports more then 8 axes simply discard dwAxes data an only use
-    //    axis_indices
-    // 2. dwAxes and axis_indices value disagree and dwAxes is > 0 and < 9 while
-    //    axis_info is empty, hope for the best and assume we have dwAxes linear
-    //    axes present and fix axis_information
-
-    // There is something wrong with the reported axis counts, many ways to
-    // fix the discrepancy.
-    if(axis_indices.size() != capabilities.dwAxes)
-    {
-        if(capabilities.dwAxes > 0 && capabilities.dwAxes < 9 && axis_indices.size() == 0)
-        {
-            // No axis map data enumerated but valid looking axis count reported, lets
-            // hope these are all one after the other
-            info.axis_count = capabilities.dwAxes;
-            for(size_t i=0; i<info.axis_count; ++i)
-            {
-                info.axis_map[i].linear_index = i+1;
-                info.axis_map[i].axis_index = i+1;
-            }
-
-            logger->warn(
-                "{} {}: Axis information, invalid hoping for the best, capabilities={} enumerated={}",
-                info.name,
-                guid_to_string(info.device_guid),
-                capabilities.dwAxes,
-                axis_indices.size()
-            );
-        }
-
-        else
-        {
-            // Some other invalid axis count information returned, simply trust the
-            // axis enumeration
-            info.axis_count = axis_indices.size();
-            for(size_t i=0; i<axis_indices.size(); ++i)
-            {
-                info.axis_map[i].linear_index = i+1;
-                info.axis_map[i].axis_index = axis_indices[i];
-            }
-            logger->warn(
-                "{} {}: Overriding reported number of axes,  capabilities={} enumerated={}",
-                info.name,
-                guid_to_string(info.device_guid),
-                capabilities.dwAxes,
-                axis_indices.size()
-            );
-        }
-
-    }
-    // Both axis counts agree, so we'll just use those
-    else
-    {
-        info.axis_count = capabilities.dwAxes;
-        for(size_t i=0; i<axis_indices.size(); ++i)
-        {
-            info.axis_map[i].linear_index = i+1;
-            info.axis_map[i].axis_index = axis_indices[i];
-        }
-    }
-
+    build_axis_map(axis_ctx.detected_offsets, info.axis_count, info.axis_map);
 
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
 
     // Write device summary to debug file
     logger->info("Device summary: {} {}", info.name,guid_to_string(guid));
-    logger->info("Axis={} Buttons={} Hats={}", info.axis_count, info.button_count, info.hat_count);
+    logger->info(
+        "Axis={} Buttons={} Hats={}",
+        info.axis_count,
+        info.button_count,
+        info.hat_count
+    );
     logger->info("Axis map");
     for(auto const& entry : info.axis_map)
     {
@@ -762,9 +723,6 @@ void initialize_device(GUID guid, std::string name)
         g_data_store.active_guids.push_back(guid);
     }
 
-    // Set the axis range for each axis of the device
-    device->EnumObjects(set_axis_range, device, DIDFT_ALL);
-
     g_data_store.cache[guid] = info;
     if(g_device_change_callback != nullptr && execute_callback)
     {
@@ -778,7 +736,7 @@ void initialize_device(GUID guid, std::string name)
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data)
 {
     // Convert user data pointer to data storage device
-    std::unordered_map<GUID, bool>* current_devices = 
+    std::unordered_map<GUID, bool>* current_devices =
         reinterpret_cast<std::unordered_map<GUID, bool>*>(data);
 
     logger->info(
@@ -873,7 +831,7 @@ void enumerate_devices()
                 break;
             }
         }
- 
+
         if(g_device_change_callback != nullptr)
         {
             g_device_change_callback(di, DeviceActionType::Disconnected);
@@ -887,7 +845,7 @@ BOOL init()
 {
     g_initialization_done = false;
     logger->info("Initializing DILL v1.3");
-    
+
     // Force an update of device enumeration to bootstrap everything
     enumerate_devices();
 
@@ -1023,34 +981,6 @@ LONG get_hat(GUID guid, DWORD index)
     }
 
     return g_data_store.state[guid].hat[index];
-}
-
-std::vector<int> used_axis_indices(GUID guid)
-{
-    DIJOYSTATE2 state;
-    g_data_store.device_map[guid]->Poll();
-    auto result = g_data_store.device_map[guid]->GetDeviceState(
-        sizeof(state),
-        &state
-    );
-
-    if(FAILED(result))
-    {
-        logger->critical("Failed determining used axes indices.");
-        return {};
-    }
-
-    std::vector<int> used_indices;
-    if(state.lX != 0)           { used_indices.push_back(1); }
-    if(state.lY != 0)           { used_indices.push_back(2); }
-    if(state.lZ != 0)           { used_indices.push_back(3); }
-    if(state.lRx != 0)          { used_indices.push_back(4); }
-    if(state.lRy != 0)          { used_indices.push_back(5); }
-    if(state.lRz != 0)          { used_indices.push_back(6); }
-    if(state.rglSlider[0] != 0) { used_indices.push_back(7); }
-    if(state.rglSlider[1] != 0) { used_indices.push_back(8); }
-
-    return used_indices;
 }
 
 DWORD get_vendor_id(LPDIRECTINPUTDEVICE8 device, GUID guid)
