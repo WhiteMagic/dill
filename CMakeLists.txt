@@ -23,3 +23,4 @@ target_link_libraries( example dill )
 add_executable( example2 src/example2.cpp )
 target_link_libraries( example2 dill )
 
+add_executable( dill_tests src/axis_mapping.cpp tests/test_axis_mapping.cpp )
