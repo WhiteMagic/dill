@@ -17,7 +17,7 @@ using AxisOffset = DWORD;
  * \brief Maps a DIJOYSTATE2 axis offset to DILL's axis_index.
  *
  * \param offset DIJOYSTATE2 byte offset, e.g. DIJOFS_X
- * \return axis_index (1-8), or 0 if unrecognized
+ * \return axis_index (1-8), or (DWORD)-1 if unrecognized
  */
 DWORD axis_index_for_offset(AxisOffset offset);
 
@@ -25,7 +25,7 @@ DWORD axis_index_for_offset(AxisOffset offset);
  * \brief Maps a DILL axis_index to its DIJOYSTATE2 byte offset.
  *
  * \param axis_index DILL axis index (1-8)
- * \return DIJOYSTATE2 byte offset, or 0 if out of range
+ * \return DIJOYSTATE2 byte offset, or (AxisOffset)-1 if out of range
  */
 AxisOffset offset_for_axis_index(DWORD axis_index);
 

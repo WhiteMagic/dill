@@ -32,7 +32,9 @@ DWORD axis_index_for_offset(AxisOffset offset)
         g_axis_di_offset_lookup.cend(),
         [offset](AxisDIOffset const& slot) { return slot.offset == offset; }
     );
-    return it != g_axis_di_offset_lookup.cend() ? it->axis_index : 0;
+    return it != g_axis_di_offset_lookup.cend()
+        ? it->axis_index
+        : static_cast<DWORD>(-1);
 }
 
 AxisOffset offset_for_axis_index(DWORD axis_index)
@@ -44,7 +46,9 @@ AxisOffset offset_for_axis_index(DWORD axis_index)
             return slot.axis_index == axis_index;
         }
     );
-    return it != g_axis_di_offset_lookup.cend() ? it->offset : 0;
+    return it != g_axis_di_offset_lookup.cend()
+        ? it->offset
+        : static_cast<AxisOffset>(-1);
 }
 
 void build_axis_map(

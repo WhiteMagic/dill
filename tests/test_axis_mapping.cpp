@@ -106,9 +106,9 @@ TEST_CASE(
     }
 }
 
-TEST_CASE("unknown axis_index/offset resolve to 0", "[axis_mapping]")
+TEST_CASE("unknown axis_index/offset resolve to -1", "[axis_mapping]")
 {
-    REQUIRE(offset_for_axis_index(0) == 0);
-    REQUIRE(offset_for_axis_index(9) == 0);
-    REQUIRE(axis_index_for_offset(0xDEADBEEF) == 0);
+    REQUIRE(offset_for_axis_index(0) == static_cast<AxisOffset>(-1));
+    REQUIRE(offset_for_axis_index(9) == static_cast<AxisOffset>(-1));
+    REQUIRE(axis_index_for_offset(0xDEADBEEF) == static_cast<DWORD>(-1));
 }

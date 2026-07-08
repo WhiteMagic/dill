@@ -71,6 +71,19 @@ namespace
         {GUID_RyAxis, 5},
         {GUID_RzAxis, 6},
     };
+
+    // Resolves axis_index to its DIJOYSTATE2 offset, logging and returning
+    // false if axis_index does not name a known axis.
+    bool try_get_axis_offset(DWORD axis_index, AxisOffset& out_offset)
+    {
+        out_offset = offset_for_axis_index(axis_index);
+        if(out_offset == static_cast<AxisOffset>(-1))
+        {
+            logger->error("No DIJOYSTATE2 offset for axis_index {}", axis_index);
+            return false;
+        }
+        return true;
+    }
 }
 
 
@@ -211,8 +224,19 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
     // Figure out the event's input type.
     if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgdwPOV))
     {
+        const DWORD axis_index = axis_index_for_offset(data.dwOfs);
+        if(axis_index == 0 || axis_index > 8)
+        {
+            logger->error(
+                "{}: Received axis event for unrecognized offset {}",
+                guid_to_string(guid),
+                data.dwOfs
+            );
+            return;
+        }
+
         evt.input_type = JoystickInputType::Axis;
-        evt.input_index = static_cast<UINT8>(axis_index_for_offset(data.dwOfs));
+        evt.input_index = static_cast<UINT8>(axis_index);
         evt.value = data.dwData;
         g_data_store.state[guid].axis[evt.input_index] = evt.value;
     }
@@ -354,7 +378,11 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
     for(size_t i=0; i<g_data_store.cache[guid].axis_count; ++i)
     {
         auto axis_index = g_data_store.cache[guid].axis_map[i].axis_index;
-        auto offset = offset_for_axis_index(axis_index);
+        AxisOffset offset;
+        if(!try_get_axis_offset(axis_index, offset))
+        {
+            continue;
+        }
         LONG value = *reinterpret_cast<LONG const*>(
             reinterpret_cast<char const*>(&state) + offset
         );
@@ -512,17 +540,34 @@ BOOL CALLBACK enumerate_axis_objects(
 
     if(lpddoi->guidType == GUID_Slider)
     {
-        ctx->detected_offsets.push_back(offset_for_axis_index(
-            7 + ctx->slider_count
-        ));
-        ++ctx->slider_count;
+        // There should only ever be two sliders, any more will be logged and
+        // ignored.
+        if (ctx->slider_count < 2)
+        {
+            AxisOffset offset;
+            if(try_get_axis_offset(7 + ctx->slider_count, offset))
+            {
+                ctx->detected_offsets.push_back(offset);
+            }
+            ++ctx->slider_count;
+        }
+        else
+        {
+            logger->warn(
+                "More than two sliders detected, ignoring additional ones.")
+            ;
+        }
     }
     else
     {
         const auto it = g_axis_guid_lookup.find(lpddoi->guidType);
         if(it != g_axis_guid_lookup.end())
         {
-            ctx->detected_offsets.push_back(offset_for_axis_index(it->second));
+            AxisOffset offset;
+            if(try_get_axis_offset(it->second, offset))
+            {
+                ctx->detected_offsets.push_back(offset);
+            }
         }
     }
 
