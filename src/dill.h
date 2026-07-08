@@ -223,6 +223,14 @@ HWND create_window();
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data);
 
 /**
+ * \brief Callback processing an axis of a DirectInput device.
+ */
+BOOL CALLBACK enumerate_axis_objects(
+    LPCDIDEVICEOBJECTINSTANCE       lpddoi,
+    LPVOID                          pvRef
+);
+
+/**
  * \brief Enumerates all DirectInput devices present on the system.
  */
 void enumerate_devices();

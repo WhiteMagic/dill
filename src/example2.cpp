@@ -63,7 +63,7 @@ void device_change_callback(DeviceSummary info, DeviceActionType action)
 int main(int argc, char *argv[])
 {
     //set_input_event_callback(event_callback);
-    //set_device_change_callback(device_change_callback);
+    set_device_change_callback(device_change_callback);
     init();
 
     for(size_t i=0; i<get_device_count(); ++i)
@@ -114,7 +114,7 @@ int main(int argc, char *argv[])
         }
         std::cout << "-------------" << std::endl;
         */
-        
+
         SleepEx(5000, 0);
     }
 

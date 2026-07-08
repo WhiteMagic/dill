@@ -1,6 +1,5 @@
 #include "dill.h"
 
-#include <algorithm>
 #include <atomic>
 #include <iostream>
 #include <memory>
@@ -62,15 +61,15 @@ namespace
         std::vector<AxisOffset>     detected_offsets;
     };
 
-    // Lookup table for axis GUID to EnumObject offsets.
-    const std::unordered_map<GUID, AxisOffset> g_axis_guid_lookup =
+    // Lookup table for axis GUID to axis_index.
+    const std::unordered_map<GUID, DWORD> g_axis_guid_lookup =
     {
-        {GUID_XAxis,  DIJOFS_X},
-        {GUID_YAxis,  DIJOFS_Y},
-        {GUID_ZAxis,  DIJOFS_Z},
-        {GUID_RxAxis, DIJOFS_RX},
-        {GUID_RyAxis, DIJOFS_RY},
-        {GUID_RzAxis, DIJOFS_RZ},
+        {GUID_XAxis,  1},
+        {GUID_YAxis,  2},
+        {GUID_ZAxis,  3},
+        {GUID_RxAxis, 4},
+        {GUID_RyAxis, 5},
+        {GUID_RzAxis, 6},
     };
 }
 
@@ -511,9 +510,20 @@ BOOL CALLBACK enumerate_axis_objects(
 {
     AxisEnumContext* ctx = reinterpret_cast<AxisEnumContext*>(pvRef);
 
-    if(!(lpddoi->dwType & DIDFT_AXIS))
+    if(lpddoi->guidType == GUID_Slider)
     {
-        return DIENUM_CONTINUE;
+        ctx->detected_offsets.push_back(offset_for_axis_index(
+            7 + ctx->slider_count
+        ));
+        ++ctx->slider_count;
+    }
+    else
+    {
+        const auto it = g_axis_guid_lookup.find(lpddoi->guidType);
+        if(it != g_axis_guid_lookup.end())
+        {
+            ctx->detected_offsets.push_back(offset_for_axis_index(it->second));
+        }
     }
 
     DIPROPRANGE range;
@@ -532,22 +542,6 @@ BOOL CALLBACK enumerate_axis_objects(
             "Error while setting axis range, {}",
             error_to_string(result)
         );
-        return DIENUM_CONTINUE;
-    }
-
-    // Resolve GUID type to an index.
-    if(lpddoi->guidType == GUID_Slider)
-    {
-        ctx->detected_offsets.push_back(DIJOFS_SLIDER(ctx->slider_count));
-        ++ctx->slider_count;
-    }
-    else
-    {
-        const auto it = g_axis_guid_lookup.find(lpddoi->guidType);
-        if(it != g_axis_guid_lookup.end())
-        {
-            ctx->detected_offsets.push_back(it->second);
-        }
     }
 
     return DIENUM_CONTINUE;
@@ -690,6 +684,26 @@ void initialize_device(GUID guid, std::string name)
 
     build_axis_map(axis_ctx.detected_offsets, info.axis_count, info.axis_map);
 
+    if(capabilities.dwAxes > 8)
+    {
+        logger->error(
+            "{} {}: Reports more than 8 axes, {}",
+            info.name,
+            guid_to_string(info.device_guid),
+            capabilities.dwAxes
+        );
+    }
+    if(info.axis_count != capabilities.dwAxes)
+    {
+        logger->warn(
+            "{} {}: Axis count mismatch, enumerated={} capabilities={}",
+            info.name,
+            guid_to_string(info.device_guid),
+            info.axis_count,
+            capabilities.dwAxes
+        );
+    }
+
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
 
@@ -790,7 +804,10 @@ void enumerate_devices()
     );
     if(FAILED(result))
     {
-        logger->error("Failure occured while discovering devices, {}", error_to_string(result));
+        logger->error(
+            "Failure occured while discovering devices, {}",
+            error_to_string(result)
+        );
     }
 
     // Get rid of devices we no longer have from the global map
