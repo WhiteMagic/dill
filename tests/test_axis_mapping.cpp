@@ -1,5 +1,5 @@
 #define CATCH_CONFIG_MAIN
-#include "catch2/catch.hpp"
+#include "catch2/catch_amalgamated.hpp"
 
 #include "axis_mapping.h"
 

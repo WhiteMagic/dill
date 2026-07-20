@@ -7,10 +7,12 @@
 #include <Dbt.h>
 #include <dinput.h>
 
+#include <array>
 #include <mutex>
 #include <string>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 #define FMT_UNICODE 0
 
@@ -67,7 +69,7 @@ struct JoystickInputData
 {
     GUID                                device_guid;
     JoystickInputType                   input_type;
-    // In case of an axis this is the axis_index and not the linear_index
+    // In case of an axis this is the axis_index and not the linear_index.
     UINT8                               input_index;
     LONG                                value;
 };
@@ -120,24 +122,26 @@ struct DeviceState
  */
 struct DeviceDataStore
 {
-    //! Maps from GUID to DirectInput device instance
+    //! Maps from GUID to DirectInput device instance.
     std::unordered_map<GUID, LPDIRECTINPUTDEVICE8> device_map;
-    //! Indicates whether or not a device is buffered
+    //! Indicates if a device requires buffered treatment.
     std::unordered_map<GUID, bool> is_buffered;
-    //! Caches DeviceSummary for devices
+    //! Caches DeviceSummary for devices.
     std::unordered_map<GUID, DeviceSummary> cache;
-    //! Last known state of the device
+    //! Last known state of the device.
     std::unordered_map<GUID, DeviceState> state;
-    //! Flag indicating whether or not the device is fully operational
+    //! Flag indicating if a device is fully operational.
     std::unordered_map<GUID, bool> is_ready;
-    //! List of active GUIDs
+    //! List of all active GUIDs.
     std::vector<GUID> active_guids;
+    //! Device notification event used with SetEventNotification.
+    std::unordered_map<GUID, HANDLE> event_handles;
 };
 
 
-//! Callback for joystick value change events
+//! Callback for joystick value change events.
 typedef void (*JoystickInputEventCallback)(JoystickInputData);
-//! Callback for device change events
+//! Callback for device change events.
 typedef void (*DeviceChangeCallback)(DeviceSummary, DeviceActionType);
 
 
@@ -161,7 +165,7 @@ std::string error_to_string(DWORD message_id);
 /**
  * \brief Callback for window creation.
  *
- * Subscribes toe device change events.
+ * Subscribes to device change events.
  */
 BOOL on_create_window(HWND window_hdl, LPARAM l_param);
 
@@ -203,14 +207,35 @@ void emit_joystick_input_event(
 void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid);
 
 /**
- * \brief Thread function handling joystick messages.
+ * \brief Main event processing loop.
+ *
+ * Handles processing of device event notfication and device changes.
  */
-DWORD WINAPI joystick_update_thread(LPVOID l_param);
+void event_loop_main();
+
+//! Number of usable slots to wait on device events. One slot is reserved
+//! by the event loop system itself.
+constexpr DWORD k_max_wait_handles = MAXIMUM_WAIT_OBJECTS - 1;
+
+//! Number of control events (quit, rebuild, hotplug) used. The startup_done
+//! event is not a part of this set.
+constexpr DWORD k_control_handle_count = 3;
 
 /**
- * \brief Handles general windows messages.
+ * \brief Rebuild handles for MsgWaitForMultipleObjectsEx entries.
+ *
+ * \param handles MsgWaitForMultipleObjectsEx handle array
+ * \param handle_count number of handle entries
+ * \param handle_guids list of device GUIDs
+ * \param periodic_service_needed set to true if a polled-fallback device
+ *        exists
  */
-DWORD WINAPI message_handler_thread(LPVOID l_param);
+void rebuild_wait_handles(
+    std::array<HANDLE, k_max_wait_handles>& handles,
+    DWORD&                              handle_count,
+    std::vector<GUID>&                  handle_guids,
+    bool&                               periodic_service_needed
+);
 
 /**
  * \brief Creates the "window" infrastructure needed to receive messages.
@@ -275,9 +300,20 @@ extern "C"
 {
     /**
      * \brief Initializes the library.
+     *
+     * Enumerates devices and starts the internal event loop thread. Blocks
+     * until the initial enumeration has completed.
      */
     __declspec(dllexport)
     BOOL init();
+
+    /**
+     * \brief Terminates the library listening to device inputs.
+     *
+     * Joins the internal event loop thread and releases resource.
+     */
+    __declspec(dllexport)
+    BOOL shutdown();
 
     /**
      * \brief Sets the callback for input events.
@@ -321,8 +357,8 @@ extern "C"
     /**
      * \brief Returns the current axis value.
      *
-     * The provided index is an "axis_index", i.e. not a linear one but the
-     * index specifying a particular axis with gaps.
+     * The provided index is an "axis_index", i.e. not the linear enumeration
+     * but the index specifying a particular axis with gaps.
      *
      * \param guid GUID of the device to query
      * \param index axis index to query
@@ -335,7 +371,7 @@ extern "C"
      * \brief Returns the state of a button on a given device.
      *
      * \param guid GUID of the device to query
-     * \param index the index of the button to query
+     * \param index 1-based button index (1-128)
      * \return current state of the queried button
      */
     __declspec(dllexport)
@@ -345,7 +381,7 @@ extern "C"
      * \brief Returns the state of a hat on a given device.
      *
      * \param guid GUID of the device to query
-     * \param index the index of the hat to query
+     * \param index 1-based hat index (1-4)
      * \return current state of the queried hat
      */
     __declspec(dllexport)

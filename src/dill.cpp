@@ -1,10 +1,16 @@
 #include "dill.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string.h>
 #include <sstream>
+#include <thread>
+
+#include <objbase.h>
 
 #include "axis_mapping.h"
 #include "spdlog/spdlog.h"
@@ -12,15 +18,13 @@
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/sinks/basic_file_sink.h"
 
-
-#define HID_CLASSGUID {0x4d1e55b2, 0xf16f, 0x11cf,{ 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}}
-#define CLS_NAME TEXT("GremlinInputListener")
-#define HWND_MESSAGE ((HWND)-3)
-
-
 namespace spd = spdlog;
 
-// Setup logger
+#define HID_CLASSGUID {0x4d1e55b2, 0xf16f, 0x11cf, {0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}}
+#define CLS_NAME TEXT("DirectInputListenerLibrary")
+#define HWND_MESSAGE ((HWND)-3)
+
+// Setup logger with file rotation.
 static const int k_max_log_size = 1024 * 1024 * 2;
 auto fixed_size_sink = std::make_shared<spd::sinks::rotating_file_sink_mt>(
     "dill_debug.log",
@@ -30,25 +34,54 @@ auto fixed_size_sink = std::make_shared<spd::sinks::rotating_file_sink_mt>(
 auto logger = std::make_shared<spd::logger>("debug", fixed_size_sink);
 //auto logger = spd::stdout_color_mt("console");
 
-// DirectInput system handle
+// DirectInput system handle used in the event loop thread.
 LPDIRECTINPUT8 g_direct_input = nullptr;
 
-// Size of the device object read buffer
+// Size of the device object read buffer.
 static const int g_buffer_size = 64;
 
-// Storage for device data
+// Storage for device data, access guarded by g_data_store_mutex.
 static DeviceDataStore g_data_store;
+static std::mutex g_data_store_mutex;
 
-// Callback handles
-JoystickInputEventCallback g_event_callback = nullptr;
-DeviceChangeCallback g_device_change_callback = nullptr;
+// Callback handles, provided by client code and called from the event thread.
+std::atomic<JoystickInputEventCallback> g_event_callback{nullptr};
+std::atomic<DeviceChangeCallback> g_device_change_callback{nullptr};
 
-// Thread handles
-HANDLE g_message_thread = NULL;
-HANDLE g_joystick_thread = NULL;
+// Handle for window and device notification messages.
+static HWND g_hwnd = nullptr;
+static HDEVNOTIFY g_device_notify = nullptr;
 
-// Flag indicating whether or not device initialization is complete
-std::atomic<bool> g_initialization_done = false;
+// Event handles to control the MsgWaitForMultipleObjectsEx processing loop.
+static HANDLE g_quit_event = nullptr;
+static HANDLE g_rebuild_event = nullptr;
+static HANDLE g_hotplug_event = nullptr;
+static HANDLE g_startup_done_event = nullptr;
+static std::atomic<bool> g_startup_failed{false};
+
+// Status flag.
+static std::atomic<bool> g_running{false};
+
+// A joinable std::thread's destructor calls std::terminate(). If
+// shutdown() was never called, detaching here avoids that crash when the
+// process exits.
+struct LoopThreadGuard
+{
+    std::thread thread;
+    ~LoopThreadGuard()
+    {
+        if(thread.joinable())
+        {
+            logger->warn(
+                "shutdown() was never called; detaching the event "
+                "loop thread to avoid a crash on exit"
+            );
+            logger->flush();
+            thread.detach();
+        }
+    }
+};
+static LoopThreadGuard g_loop;
 
 
 namespace
@@ -84,13 +117,76 @@ namespace
         }
         return true;
     }
+
+    // Helper function to close and clean up all still active control events.
+    void close_control_events()
+    {
+        if(g_quit_event != nullptr)
+        {
+            CloseHandle(g_quit_event);
+            g_quit_event = nullptr;
+        }
+        if(g_rebuild_event != nullptr)
+        {
+            CloseHandle(g_rebuild_event);
+            g_rebuild_event = nullptr;
+        }
+        if(g_hotplug_event != nullptr)
+        {
+            CloseHandle(g_hotplug_event);
+            g_hotplug_event = nullptr;
+        }
+        if(g_startup_done_event != nullptr)
+        {
+            CloseHandle(g_startup_done_event);
+            g_startup_done_event = nullptr;
+        }
+    }
+
+    // Closes the control events unless dismiss() is called first. Used by
+    // init() so every failure path (including exceptions thrown by
+    // std::thread's constructor) closes any events it already created,
+    // instead of leaking them when the globals get overwritten by the next
+    // init() attempt.
+    struct ControlEventGuard
+    {
+        bool dismissed = false;
+        void dismiss() { dismissed = true; }
+        ~ControlEventGuard()
+        {
+            if(!dismissed)
+            {
+                close_control_events();
+            }
+        }
+    };
+
+    // Explicitly brackets COM apartment lifetime on the event loop thread.
+    // DirectInput8Create/EnumDevices use COM interfaces; without an explicit
+    // CoInitializeEx/CoUninitialize pair, a fresh apartment gets implicitly
+    // initialized on first use and its teardown on thread exit is not
+    // guaranteed to be prompt - since a new OS thread is created for every
+    // init()/shutdown() cycle, that showed up as steadily growing process
+    // handle counts across repeated cycles.
+    struct COMInitializer
+    {
+        HRESULT result;
+        COMInitializer() : result(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)) {}
+        ~COMInitializer()
+        {
+            if(SUCCEEDED(result))
+            {
+                CoUninitialize();
+            }
+        }
+    };
 }
 
 
 DeviceState::DeviceState()
     :   axis(9, 0)
-      , button(128, false)
-      , hat(4, -1)
+      , button(129, false)
+      , hat(5, -1)
 {}
 
 
@@ -160,22 +256,24 @@ BOOL on_create_window(HWND window_hdl, LPARAM l_param)
         logger->critical("Could not register for devicenotifications!");
         throw std::runtime_error("Could not register for device notifications!");
     }
+    g_device_notify = dev_notify;
 
     return TRUE;
 }
 
 BOOL on_device_change(LPARAM l_param, WPARAM w_param)
 {
+    // WM_DEVICECHANGE is delivered via SendMessage, so this can run
+    // reentrantly from inside MsgWaitForMultipleObjectsEx on the event loop
+    // thread (see g_hotplug_event's comment). Only signal the event here -
+    // the actual enumerate_devices() call happens from the loop's own
+    // top-level iteration, never nested inside this callback.
     PDEV_BROADCAST_HDR lpdb = reinterpret_cast<PDEV_BROADCAST_HDR>(l_param);
-    PDEV_BROADCAST_DEVICEINTERFACE lpdbv =
-        reinterpret_cast<PDEV_BROADCAST_DEVICEINTERFACE>(lpdb);
-    std::string path;
     if(lpdb->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
     {
-        path = std::string(lpdbv->dbcc_name);
         if(w_param == DBT_DEVICEARRIVAL || w_param == DBT_DEVICEREMOVECOMPLETE)
         {
-            enumerate_devices();
+            SetEvent(g_hotplug_event);
         }
     }
 
@@ -221,7 +319,8 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         {FIELD_OFFSET(DIJOYSTATE2, rgdwPOV[3]), 4}
     };
 
-    // Figure out the event's input type.
+    // Figure out the event's input type based on the DIJOYSTATE2 data
+    // structure's offset.
     if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgdwPOV))
     {
         const DWORD axis_index = axis_index_for_offset(data.dwOfs);
@@ -238,14 +337,20 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         evt.input_type = JoystickInputType::Axis;
         evt.input_index = static_cast<UINT8>(axis_index);
         evt.value = data.dwData;
-        g_data_store.state[guid].axis[evt.input_index] = evt.value;
+        {
+            std::lock_guard<std::mutex> lock(g_data_store_mutex);
+            g_data_store.state[guid].axis[evt.input_index] = evt.value;
+        }
     }
     else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, rgbButtons))
     {
         evt.input_type = JoystickInputType::Hat;
         evt.input_index = hat_id_lookup[data.dwOfs];
         evt.value = data.dwData;
-        g_data_store.state[guid].hat[evt.input_index] = evt.value;
+        {
+            std::lock_guard<std::mutex> lock(g_data_store_mutex);
+            g_data_store.state[guid].hat[evt.input_index] = evt.value;
+        }
     }
     else if(data.dwOfs < FIELD_OFFSET(DIJOYSTATE2, lVX))
     {
@@ -254,8 +359,11 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
             data.dwOfs - FIELD_OFFSET(DIJOYSTATE2, rgbButtons) + 1
         );
         evt.value = (data.dwData & 0x0080) == 0 ? 0 : 1;
-        g_data_store.state[guid].button[evt.input_index] =
-            evt.value == 0 ? false : true;
+        {
+            std::lock_guard<std::mutex> lock(g_data_store_mutex);
+            g_data_store.state[guid].button[evt.input_index] =
+                evt.value == 0 ? false : true;
+        }
     }
     else
     {
@@ -265,15 +373,16 @@ void emit_joystick_input_event(DIDEVICEOBJECTDATA const& data, GUID const& guid)
         );
     }
 
-    if(g_event_callback != nullptr)
+    auto callback = g_event_callback.load();
+    if(callback != nullptr)
     {
-        g_event_callback(evt);
+        callback(evt);
     }
 }
 
 void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
 {
-    // Poll device to get things going
+    // Poll device to get things going.
     auto result = instance->Poll();
     if(FAILED(result))
     {
@@ -287,7 +396,7 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         instance->Poll();
     }
 
-    // Retrieve buffered data
+    // Retrieve buffered data.
     DIDEVICEOBJECTDATA device_data[g_buffer_size];
     DWORD object_count = g_buffer_size;
     while(object_count == g_buffer_size)
@@ -326,7 +435,7 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
             object_count = 0;
 
             // If this failure arose due to buffered reading not being possible
-            // revert the device to polled mode
+            // revert the device to polled mode.
             if(result == DIERR_NOTBUFFERED)
             {
                 logger->error(
@@ -335,7 +444,27 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
                     guid_to_string(guid),
                     error_to_string(result)
                 );
-                g_data_store.is_buffered[guid] = false;
+
+                // Remove the event notification handle of this device as it
+                // no longer operates in buffered mode.
+                HANDLE old_event = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(g_data_store_mutex);
+                    g_data_store.is_buffered[guid] = false;
+                    const auto it = g_data_store.event_handles.find(guid);
+                    if(it != g_data_store.event_handles.end())
+                    {
+                        old_event = it->second;
+                        g_data_store.event_handles.erase(it);
+                    }
+                }
+                // Resetthe handle and force a refresh of all handles.
+                if(old_event != nullptr)
+                {
+                    instance->SetEventNotification(nullptr);
+                    CloseHandle(old_event);
+                    SetEvent(g_rebuild_event);
+                }
             }
         }
     }
@@ -343,7 +472,7 @@ void process_buffered_events(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
 
 void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
 {
-    // Poll device to update internal state
+    // Poll device to update internal state.
     auto result = instance->Poll();
     if(FAILED(result))
     {
@@ -357,7 +486,7 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         instance->Poll();
     }
 
-    // Obtain device state
+    // Obtain device state.
     DIJOYSTATE2 state;
     result = instance->GetDeviceState(sizeof(DIJOYSTATE2), &state);
     if(FAILED(result))
@@ -370,130 +499,304 @@ void poll_device(LPDIRECTINPUTDEVICE8 instance, GUID const& guid)
         return;
     }
 
-    // Event structure to use with the callback
-    JoystickInputData evt;
-    evt.device_guid = guid;
+    // Gather changed values while acquiring the lock once, then emit callbacks
+    // afterward without the lock.
+    auto callback = g_event_callback.load();
+    std::vector<JoystickInputData> change_events;
 
-    // Detect and handle axis state changes
-    for(size_t i=0; i<g_data_store.cache[guid].axis_count; ++i)
     {
-        auto axis_index = g_data_store.cache[guid].axis_map[i].axis_index;
-        AxisOffset offset;
-        if(!try_get_axis_offset(axis_index, offset))
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+
+        // Detect axis state changes.
+        for(size_t i=0; i<g_data_store.cache[guid].axis_count; ++i)
         {
+            auto axis_index = g_data_store.cache[guid].axis_map[i].axis_index;
+            AxisOffset offset;
+            if(!try_get_axis_offset(axis_index, offset))
+            {
+                continue;
+            }
+            LONG value = *reinterpret_cast<LONG const*>(
+                reinterpret_cast<char const*>(&state) + offset
+            );
+
+            if(g_data_store.state[guid].axis[axis_index] != value)
+            {
+                g_data_store.state[guid].axis[axis_index] = value;
+
+                JoystickInputData evt;
+                evt.device_guid = guid;
+                evt.input_type = JoystickInputType::Axis;
+                evt.input_index = static_cast<UINT8>(axis_index);
+                evt.value = value;
+                change_events.push_back(evt);
+            }
+        }
+
+        // Detect button state changes.
+        for(size_t i=0; i<g_data_store.cache[guid].button_count; ++i)
+        {
+            auto is_pressed = (state.rgbButtons[i] & 0x0080) == 0 ? false : true;
+            if(g_data_store.state[guid].button[i+1] != is_pressed)
+            {
+                g_data_store.state[guid].button[i+1] = is_pressed;
+
+                JoystickInputData evt;
+                evt.device_guid = guid;
+                evt.input_type = JoystickInputType::Button;
+                evt.input_index = static_cast<UINT8>(i + 1);
+                evt.value = is_pressed;
+                change_events.push_back(evt);
+            }
+        }
+
+        // Detect hat state changes.
+        for(size_t i=0; i<g_data_store.cache[guid].hat_count; ++i)
+        {
+            LONG direction = state.rgdwPOV[i];
+            if(direction < 0 || direction > 36000)
+            {
+                direction = -1;
+            }
+            if(g_data_store.state[guid].hat[i+1] != direction)
+            {
+                g_data_store.state[guid].hat[i+1] = direction;
+
+                JoystickInputData evt;
+                evt.device_guid = guid;
+                evt.input_type = JoystickInputType::Hat;
+                evt.input_index = static_cast<UINT8>(i+1);
+                evt.value = direction;
+                change_events.push_back(evt);
+            }
+        }
+    }
+
+    // Emit events via the callback in quick succession without the lock.
+    if(callback != nullptr)
+    {
+        for(auto const& evt : change_events)
+        {
+            callback(evt);
+        }
+    }
+}
+
+void rebuild_wait_handles(
+    std::array<HANDLE, k_max_wait_handles>& handles,
+    DWORD&                              handle_count,
+    std::vector<GUID>&                  handle_guids,
+    bool&                               periodic_service_needed
+)
+{
+    // Create a copy of the mapping between GUID and HANDLE for each buffered
+    // device before processing this without a lock.
+    std::vector<std::pair<GUID, HANDLE>> buffered_snapshot;
+    bool any_polled = false;
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        for(auto const& [guid, buffered] : g_data_store.is_buffered)
+        {
+            if(buffered)
+            {
+                const auto it = g_data_store.event_handles.find(guid);
+                if(it != g_data_store.event_handles.end())
+                {
+                    buffered_snapshot.emplace_back(guid, it->second);
+                }
+            }
+            else
+            {
+                any_polled = true;
+            }
+        }
+    }
+
+    handle_guids.clear();
+    handle_count = k_control_handle_count;
+    for(auto const& [guid, event] : buffered_snapshot)
+    {
+        // If more devices are connected than we support, log an error message
+        // and ignore it.
+        if(handle_count >= k_max_wait_handles)
+        {
+            logger->error(
+                "{}: more buffered devices than the {} supported wait "
+                "slots; this device will be ignored.",
+                guid_to_string(guid),
+                k_max_wait_handles - k_control_handle_count
+            );
             continue;
         }
-        LONG value = *reinterpret_cast<LONG const*>(
-            reinterpret_cast<char const*>(&state) + offset
+        handles[handle_count] = event;
+        handle_guids.push_back(guid);
+        ++handle_count;
+    }
+    periodic_service_needed = any_polled;
+}
+
+void event_loop_main()
+{
+    try
+    {
+        COMInitializer com_initializer;
+        if(FAILED(com_initializer.result))
+        {
+            logger->warn("CoInitializeEx failed, {}", com_initializer.result);
+        }
+
+        // Create window and setup device notification.
+        HWND hwnd = create_window();
+        if(hwnd == NULL)
+        {
+            logger->critical("Could not create message window!");
+            g_startup_failed = true;
+            SetEvent(g_startup_done_event);
+            return;
+        }
+        g_hwnd = hwnd;
+
+        // Enumerate devices and then indicate startup as being done.
+        enumerate_devices();
+        SetEvent(g_startup_done_event);
+
+        std::array<HANDLE, k_max_wait_handles> handles;
+        std::vector<GUID> handle_guids;
+        DWORD handle_count = k_control_handle_count;
+        bool periodic_needed = false;
+        handles[0] = g_quit_event;
+        handles[1] = g_rebuild_event;
+        handles[2] = g_hotplug_event;
+        rebuild_wait_handles(handles, handle_count, handle_guids, periodic_needed);
+
+        // Reused across WAIT_TIMEOUT ticks (which can fire every 1ms) so
+        // steady-state polling doesn't reallocate on every iteration.
+        std::vector<std::pair<GUID, LPDIRECTINPUTDEVICE8>> to_poll;
+
+        for(;;)
+        {
+            DWORD timeout = periodic_needed ? 1 : INFINITE;
+            DWORD wait_result = MsgWaitForMultipleObjectsEx(
+                handle_count,
+                handles.data(),
+                timeout,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE
+            );
+
+            // Quit requested.
+            if(wait_result == WAIT_OBJECT_0)
+            {
+                break;
+            }
+            // Rebuild the wait array, typically due to device hotplug.
+            else if(wait_result == WAIT_OBJECT_0 + 1)
+            {
+                ResetEvent(g_rebuild_event);
+                rebuild_wait_handles(
+                    handles,
+                    handle_count,
+                    handle_guids,
+                    periodic_needed
+                );
+            }
+            // Hotplug notification deferred by on_device_change().
+            else if(wait_result == WAIT_OBJECT_0 + 2)
+            {
+                // Run the blocking enumeration of devices here in the main
+                // event loop.
+                ResetEvent(g_hotplug_event);
+                enumerate_devices();
+
+                // Rebuild the wait array to be in sync with device hotplug.
+                ResetEvent(g_rebuild_event);
+                rebuild_wait_handles(
+                    handles,
+                    handle_count,
+                    handle_guids,
+                    periodic_needed
+                );
+            }
+            else if(
+                wait_result > WAIT_OBJECT_0 + 2 &&
+                wait_result < WAIT_OBJECT_0 + handle_count
+            )
+            {
+                // A single buffered device signaled.
+                size_t slot = wait_result - WAIT_OBJECT_0;
+                GUID guid = handle_guids[slot - k_control_handle_count];
+                LPDIRECTINPUTDEVICE8 device = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(g_data_store_mutex);
+                    const auto it = g_data_store.device_map.find(guid);
+                    if(it != g_data_store.device_map.end())
+                    {
+                        device = it->second;
+                    }
+                }
+                if(device != nullptr)
+                {
+                    process_buffered_events(device, guid);
+                }
+            }
+            else if(wait_result == WAIT_OBJECT_0 + handle_count)
+            {
+                // Window message queue has input, e.g. WM_DEVICECHANGE.
+                MSG msg;
+                while(PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
+                {
+                    TranslateMessage(&msg);
+                    DispatchMessage(&msg);
+                }
+            }
+            else if(wait_result == WAIT_TIMEOUT)
+            {
+                // Process polled-fallback devices.
+                to_poll.clear();
+                {
+                    std::lock_guard<std::mutex> lock(g_data_store_mutex);
+                    for(auto& [guid, device] : g_data_store.device_map)
+                    {
+                        if(!g_data_store.is_ready[guid])
+                        {
+                            continue;
+                        }
+                        if(!g_data_store.is_buffered[guid])
+                        {
+                            to_poll.emplace_back(guid, device);
+                        }
+                    }
+                }
+                for(auto& [guid, device] : to_poll)
+                {
+                    poll_device(device, guid);
+                }
+            }
+            else
+            {
+                logger->critical(
+                    "MsgWaitForMultipleObjectsEx failed, {}",
+                    GetLastError()
+                );
+                break;
+            }
+        }
+    }
+    catch(std::exception const& e)
+    {
+        logger->critical(
+            "event_loop_main terminated by exception: {}",
+            e.what()
         );
-
-        if(g_data_store.state[guid].axis[axis_index] != value)
-        {
-            evt.input_type = JoystickInputType::Axis;
-            evt.input_index = static_cast<UINT8>(axis_index);
-            evt.value = value;
-            g_data_store.state[guid].axis[axis_index] = value;
-
-            if(g_event_callback != nullptr)
-            {
-                g_event_callback(evt);
-            }
-        }
+        g_startup_failed = true;
+        SetEvent(g_startup_done_event);
     }
-
-    // Detect and handle button state changes
-    for(size_t i=0; i<g_data_store.cache[guid].button_count; ++i)
+    catch(...)
     {
-        auto is_pressed = (state.rgbButtons[i] & 0x0080) == 0 ? false : true;
-        if(g_data_store.state[guid].button[i+1] != is_pressed)
-        {
-            evt.input_type = JoystickInputType::Button;
-            evt.input_index = static_cast<UINT8>(i + 1);
-            evt.value = is_pressed;
-            g_data_store.state[guid].button[evt.input_index] = is_pressed;
-
-            if(g_event_callback != nullptr)
-            {
-                g_event_callback(evt);
-            }
-        }
+        logger->critical("event_loop_main terminated by unknown exception");
+        g_startup_failed = true;
+        SetEvent(g_startup_done_event);
     }
-
-    // Detect and handle hat state changes
-    for(size_t i=0; i<g_data_store.cache[guid].hat_count; ++i)
-    {
-        LONG direction = state.rgdwPOV[i];
-        if(direction < 0 || direction > 36000)
-        {
-            direction = -1;
-        }
-        if(g_data_store.state[guid].hat[i+1] != direction)
-        {
-            evt.input_type = JoystickInputType::Hat;
-            evt.input_index = static_cast<UINT8>(i+1);
-            evt.value = direction;
-            g_data_store.state[guid].hat[evt.input_index] = evt.value;
-
-            if(g_event_callback != nullptr)
-            {
-                g_event_callback(evt);
-            }
-        }
-    }
-}
-
-DWORD WINAPI joystick_update_thread(LPVOID l_param)
-{
-    while(true)
-    {
-        if(g_initialization_done)
-        {
-            for(auto & entry : g_data_store.device_map)
-            {
-                if(!g_data_store.is_ready[entry.first])
-                {
-                    logger->info(
-                        "Skipping device {}, not yet fully initialized",
-                        guid_to_string(entry.first)
-                    );
-                    continue;
-                }
-
-                if(g_data_store.is_buffered[entry.first])
-                {
-                    process_buffered_events(entry.second, entry.first);
-                }
-                else
-                {
-                    poll_device(entry.second, entry.first);
-                }
-            }
-        }
-        SleepEx(4, false);
-    }
-
-    return 0;
-}
-
-DWORD WINAPI message_handler_thread(LPVOID l_param)
-{
-    // Initialize the window to receive messages through
-    HWND hWnd = create_window();
-    if(hWnd == NULL)
-    {
-        logger->critical("Could not create message window!");
-        throw std::runtime_error("Could not create message window!");
-    }
-
-    // Start the message loop
-    MSG msg;
-    while(GetMessage(&msg, NULL, 0, 0))
-    {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
-
-    return 0;
 }
 
 HWND create_window()
@@ -594,30 +897,13 @@ BOOL CALLBACK enumerate_axis_objects(
 
 void initialize_device(GUID guid, std::string name)
 {
-    // Prevent any operations on this device until initialization is done
-    g_data_store.is_ready[guid] = false;
-
-    // Check if we have an existing instance in the device map
-    auto execute_callback = true;
+    // Prevent any operations on this device until initialization is done.
     {
-        if(g_data_store.device_map.find(guid) != g_data_store.device_map.end())
-        {
-            execute_callback = false;
-            auto device = g_data_store.device_map[guid];
-            auto result = device->Unacquire();
-            if(FAILED(result))
-            {
-                logger->error(
-                    "{}: Failed unacquiring device, {}",
-                    guid_to_string(guid),
-                    error_to_string(result)
-                );
-            }
-            g_data_store.device_map.erase(guid);
-        }
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        g_data_store.is_ready[guid] = false;
     }
 
-    // Create joystick device
+    // Create joystick device.
     LPDIRECTINPUTDEVICE8 device = nullptr;
     auto result = g_direct_input->CreateDevice(
         guid,
@@ -631,12 +917,9 @@ void initialize_device(GUID guid, std::string name)
             guid_to_string(guid),
             error_to_string(result)
         );
+        return;
     }
-
-    // Store device in the data storage
-    g_data_store.device_map[guid] = device;
-
-    // Setting cooperation level
+    // Setting cooperation level.
     result = device->SetCooperativeLevel(
         NULL,
         DISCL_NONEXCLUSIVE | DISCL_BACKGROUND
@@ -649,8 +932,7 @@ void initialize_device(GUID guid, std::string name)
             error_to_string(result)
         );
     }
-
-    // Set data format for reports
+    // Set data format for reports.
     result = device->SetDataFormat(&c_dfDIJoystick2);
     if(FAILED(result))
     {
@@ -660,20 +942,16 @@ void initialize_device(GUID guid, std::string name)
             error_to_string(result)
         );
     }
-
-    // Set device buffer size property
+    // Set device buffer size property. By default assume the device supports
+    // buffered reading and revert to polled upon failure.
     DIPROPDWORD prop_word;
-    DIPROPHEADER prop_header;
-    prop_header.dwSize = sizeof(DIPROPDWORD);
-    prop_header.dwHeaderSize = sizeof(DIPROPHEADER);
-    prop_header.dwObj = 0;
-    prop_header.dwHow = DIPH_DEVICE;
-    prop_word.diph = prop_header;
+    prop_word.diph.dwSize = sizeof(DIPROPDWORD);
+    prop_word.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    prop_word.diph.dwObj = 0;
+    prop_word.diph.dwHow = DIPH_DEVICE;
     prop_word.dwData = g_buffer_size;
-    // By default assume the device supports buffered reading and revert
-    // to polled upon failure
-    g_data_store.is_buffered[guid] = true;
-    result = device->SetProperty(DIPROP_BUFFERSIZE, &prop_header);
+    bool buffered = true;
+    result = device->SetProperty(DIPROP_BUFFERSIZE, &prop_word.diph);
     if(FAILED(result))
     {
         logger->error(
@@ -685,10 +963,44 @@ void initialize_device(GUID guid, std::string name)
     if(result == DI_POLLEDDEVICE)
     {
         logger->warn("Device {} is not buffered", guid_to_string(guid));
-        g_data_store.is_buffered[guid] = false;
+        buffered = false;
     }
 
-    // Acquire device
+    // For buffered devices, wire up event-driven notification before
+    // acquiring the device. SetEventNotification fails with DIERR_ACQUIRED
+    // on an already-acquired device. Either step failing degrades this
+    // device to polled rather than aborting initialization.
+    HANDLE new_event = nullptr;
+    if(buffered)
+    {
+        new_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if(new_event == nullptr)
+        {
+            logger->error(
+                "{}: Failed creating notification event, {}",
+                guid_to_string(guid),
+                GetLastError()
+            );
+            buffered = false;
+        }
+        else
+        {
+            result = device->SetEventNotification(new_event);
+            if(FAILED(result))
+            {
+                logger->error(
+                    "{}: Failed setting event notification, {}",
+                    guid_to_string(guid),
+                    error_to_string(result)
+                );
+                CloseHandle(new_event);
+                new_event = nullptr;
+                buffered = false;
+            }
+        }
+    }
+
+    // Acquire the device.
     result = device->Acquire();
     if(FAILED(result))
     {
@@ -699,7 +1011,7 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    // Query device capabilities
+    // Query device capabilities.
     DIDEVCAPS capabilities;
     capabilities.dwSize = sizeof(DIDEVCAPS);
     result = device->GetCapabilities(&capabilities);
@@ -712,7 +1024,7 @@ void initialize_device(GUID guid, std::string name)
         );
     }
 
-    // Create device summary report
+    // Create device summary report.
     DeviceSummary info;
     info.device_guid = guid;
     info.vendor_id = get_vendor_id(device, guid);
@@ -752,7 +1064,7 @@ void initialize_device(GUID guid, std::string name)
     info.button_count = capabilities.dwButtons;
     info.hat_count = capabilities.dwPOVs;
 
-    // Write device summary to debug file
+    // Write device summary to debug file.
     logger->info("Device summary: {} {}", info.name,guid_to_string(guid));
     logger->info(
         "Axis={} Buttons={} Hats={}",
@@ -767,36 +1079,65 @@ void initialize_device(GUID guid, std::string name)
     }
 
 
-    // Add device to list of active guids
-    bool add_guid = true;
-    for(size_t i=0; i<g_data_store.active_guids.size(); ++i)
+    // Write everything gathered above into the data store in one section.
     {
-        if(g_data_store.active_guids[i] == guid)
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        g_data_store.device_map[guid] = device;
+        g_data_store.is_buffered[guid] = buffered;
+        if(new_event != nullptr)
         {
-            add_guid = false;
-            break;
+            g_data_store.event_handles[guid] = new_event;
         }
-    }
-    if(add_guid)
-    {
-        g_data_store.active_guids.push_back(guid);
+
+        if(
+            std::find(
+                g_data_store.active_guids.begin(),
+                g_data_store.active_guids.end(),
+                guid
+            ) == g_data_store.active_guids.end()
+        )
+        {
+            g_data_store.active_guids.push_back(guid);
+        }
+
+        g_data_store.cache[guid] = info;
     }
 
-    g_data_store.cache[guid] = info;
-    if(g_device_change_callback != nullptr && execute_callback)
+    if(new_event != nullptr)
     {
-        g_device_change_callback(info, DeviceActionType::Connected);
+        SetEvent(g_rebuild_event);
+    }
+    auto device_change_callback = g_device_change_callback.load();
+    if(device_change_callback != nullptr)
+    {
+        device_change_callback(info, DeviceActionType::Connected);
     }
 
-    // Allow operating on the device
-    g_data_store.is_ready[guid] = true;
+    // Allow operating on the device.
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        g_data_store.is_ready[guid] = true;
+    }
 }
 
 BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data)
 {
-    // Convert user data pointer to data storage device
+    // Convert user data pointer to data storage device.
     std::unordered_map<GUID, bool>* current_devices =
         reinterpret_cast<std::unordered_map<GUID, bool>*>(data);
+
+    (*current_devices)[instance->guidInstance] = true;
+
+    // Devices we've already initialized and that are still attached are
+    // left alone.
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        if(g_data_store.device_map.find(instance->guidInstance) !=
+           g_data_store.device_map.end())
+        {
+            return DIENUM_CONTINUE;
+        }
+    }
 
     logger->info(
         "{}: Processing device: {}",
@@ -804,23 +1145,19 @@ BOOL CALLBACK handle_device_cb(LPCDIDEVICEINSTANCE instance, LPVOID data)
         std::string(instance->tszProductName)
     );
 
-    // Aggregate device information
-    (*current_devices)[instance->guidInstance] = true;
     initialize_device(
         instance->guidInstance,
         std::string(instance->tszInstanceName)
     );
 
-    // Continue to enumerate devices
+    // Continue to enumerate devices.
     return DIENUM_CONTINUE;
 }
 
 void enumerate_devices()
 {
-    g_initialization_done = false;
-
     // Register with the DirectInput system, creating an instance to
-    // interface with it
+    // interface with it.
     if(g_direct_input == nullptr)
     {
         auto result = DirectInput8Create(
@@ -855,97 +1192,263 @@ void enumerate_devices()
         );
     }
 
-    // Get rid of devices we no longer have from the global map
+    // Get rid of devices we no longer have from the global map.
     std::vector<GUID> guid_to_remove;
-    for(auto const& entry : g_data_store.device_map)
     {
-        if(current_devices.find(entry.first) == current_devices.end())
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        for(auto const& [guid, device] : g_data_store.device_map)
         {
-            guid_to_remove.push_back(entry.first);
+            if(current_devices.find(guid) == current_devices.end())
+            {
+                guid_to_remove.push_back(guid);
+            }
         }
     }
+
+    bool any_buffered_removed = false;
     for(auto const& guid : guid_to_remove)
     {
         logger->info("{}: Removing device", guid_to_string(guid));
-        g_data_store.device_map.erase(guid);
 
-        // Emit DeviceInformation, copy existing device data if we know about
-        // the device and have an existing record, otherwise return a shell
+        LPDIRECTINPUTDEVICE8 device = nullptr;
+        HANDLE event_handle = nullptr;
         DeviceSummary di;
-        if(g_data_store.cache.find(guid) != g_data_store.cache.end())
         {
-            di = g_data_store.cache[guid];
-        }
-        else
-        {
-            di.device_guid = guid;
-            strcpy_s(di.name, MAX_PATH, "Unknown");
-        }
-
-        // Remove guid from list of active ones
-        for(size_t i=0; i<g_data_store.active_guids.size(); ++i)
-        {
-            if(g_data_store.active_guids[i] == guid)
+            std::lock_guard<std::mutex> lock(g_data_store_mutex);
+            auto device_it = g_data_store.device_map.find(guid);
+            if(device_it != g_data_store.device_map.end())
             {
-                g_data_store.active_guids.erase(
-                    g_data_store.active_guids.begin() + i
-                );
-                break;
+                device = device_it->second;
+                g_data_store.device_map.erase(device_it);
+            }
+
+            auto event_it = g_data_store.event_handles.find(guid);
+            if(event_it != g_data_store.event_handles.end())
+            {
+                event_handle = event_it->second;
+                g_data_store.event_handles.erase(event_it);
+            }
+
+            // Emit DeviceInformation, copy existing device data if we know
+            // about the device and have an existing record, otherwise
+            // return an empty shell.
+            auto cache_it = g_data_store.cache.find(guid);
+            if(cache_it != g_data_store.cache.end())
+            {
+                di = cache_it->second;
+            }
+            else
+            {
+                di.device_guid = guid;
+                strcpy_s(di.name, MAX_PATH, "Unknown");
+            }
+
+            // Drop every remaining per-device entries so a guid that never
+            // reconnects doesn't linger in these maps indefinitely.
+            g_data_store.cache.erase(guid);
+            g_data_store.state.erase(guid);
+            g_data_store.is_ready.erase(guid);
+            g_data_store.is_buffered.erase(guid);
+
+            // Remove guid from list of active ones.
+            const auto it = std::find(
+                g_data_store.active_guids.begin(),
+                g_data_store.active_guids.end(),
+                guid
+            );
+            if(it != g_data_store.active_guids.end())
+            {
+                g_data_store.active_guids.erase(it);
             }
         }
 
-        if(g_device_change_callback != nullptr)
+        if(device != nullptr)
         {
-            g_device_change_callback(di, DeviceActionType::Disconnected);
+            device->SetEventNotification(nullptr);
+            device->Unacquire();
+            device->Release();
+        }
+        if(event_handle != nullptr)
+        {
+            CloseHandle(event_handle);
+            any_buffered_removed = true;
+        }
+
+        auto device_change_callback = g_device_change_callback.load();
+        if(device_change_callback != nullptr)
+        {
+            device_change_callback(di, DeviceActionType::Disconnected);
         }
     }
 
-    g_initialization_done = true;
+    if(any_buffered_removed && g_rebuild_event != nullptr)
+    {
+        SetEvent(g_rebuild_event);
+    }
 }
 
 BOOL init()
 {
-    g_initialization_done = false;
-    logger->info("Initializing DILL v1.3");
-
-    // Force an update of device enumeration to bootstrap everything
-    enumerate_devices();
-
-    // Start joystick update loop thread
-    g_joystick_thread = CreateThread(
-            NULL,
-            0,
-            joystick_update_thread,
-            NULL,
-            0,
-            NULL
-    );
-    if(g_joystick_thread == NULL)
+    try
     {
-        logger->error("Creating joystick thread failed {}", GetLastError());
+        bool expected = false;
+        if(!g_running.compare_exchange_strong(expected, true))
+        {
+            logger->warn("init() called while already running; ignoring");
+            return TRUE;
+        }
+
+        logger->info("Initializing DILL v1.5");
+        g_startup_failed = false;
+
+        // Closes any control events created below unless dismissed on the
+        // success path.
+        ControlEventGuard control_event_guard;
+
+        g_quit_event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        g_rebuild_event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        g_hotplug_event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        g_startup_done_event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        if(g_quit_event == nullptr ||
+           g_rebuild_event == nullptr ||
+           g_hotplug_event == nullptr ||
+           g_startup_done_event == nullptr)
+        {
+            logger->critical(
+                "Failed to create control events, {}",
+                GetLastError()
+            );
+            g_running = false;
+            return FALSE;
+        }
+
+        g_loop.thread = std::thread(event_loop_main);
+
+        // Block until the event loop thread has completed the startup sequence.
+        WaitForSingleObject(g_startup_done_event, INFINITE);
+
+        if(g_startup_failed)
+        {
+            logger->critical("DILL startup failed");
+            SetEvent(g_quit_event);
+            if(g_loop.thread.joinable())
+            {
+                g_loop.thread.join();
+            }
+            g_running = false;
+            return FALSE;
+        }
+
+        control_event_guard.dismiss();
+        return TRUE;
+    }
+    catch(std::exception const& e)
+    {
+        logger->critical("init() failed: {}", e.what());
+        g_running = false;
         return FALSE;
     }
-
-    // Start joystick update loop thread
-    g_message_thread = CreateThread(
-            NULL,
-            0,
-            message_handler_thread,
-            NULL,
-            0,
-            NULL
-    );
-    if(g_message_thread == NULL)
+    catch(...)
     {
-        logger->error(
-            "Creating message handler thread failed {}",
-            GetLastError()
-        );
+        logger->critical("init() failed: unknown exception");
+        g_running = false;
         return FALSE;
     }
+}
 
-    g_initialization_done = true;
-    return TRUE;
+BOOL shutdown()
+{
+    try
+    {
+        bool expected = true;
+        if(!g_running.compare_exchange_strong(expected, false))
+        {
+            logger->info("shutdown() called while not running; ignoring");
+            return FALSE;
+        }
+
+        logger->info("Shutting down DILL");
+
+        SetEvent(g_quit_event);
+        if(g_hwnd != nullptr)
+        {
+            PostMessage(g_hwnd, WM_NULL, 0, 0);
+        }
+
+        if(g_loop.thread.joinable())
+        {
+            g_loop.thread.join();
+        }
+
+        // Cohesive cleanup of all device/event handles.
+        std::vector<LPDIRECTINPUTDEVICE8> devices_to_release;
+        std::vector<HANDLE> events_to_close;
+        {
+            std::lock_guard<std::mutex> lock(g_data_store_mutex);
+            devices_to_release.reserve(g_data_store.device_map.size());
+            for(auto& [guid, device] : g_data_store.device_map)
+            {
+                devices_to_release.push_back(device);
+            }
+            events_to_close.reserve(g_data_store.event_handles.size());
+            for(auto& [guid, event] : g_data_store.event_handles)
+            {
+                events_to_close.push_back(event);
+            }
+            g_data_store.device_map.clear();
+            g_data_store.event_handles.clear();
+            g_data_store.is_buffered.clear();
+            g_data_store.cache.clear();
+            g_data_store.state.clear();
+            g_data_store.is_ready.clear();
+            g_data_store.active_guids.clear();
+        }
+        for(auto device : devices_to_release)
+        {
+            device->Unacquire();
+            device->SetEventNotification(nullptr);
+            device->Release();
+        }
+        for(auto event_handle : events_to_close)
+        {
+            CloseHandle(event_handle);
+        }
+
+        if(g_device_notify != nullptr)
+        {
+            UnregisterDeviceNotification(g_device_notify);
+            g_device_notify = nullptr;
+        }
+        if(g_hwnd != nullptr)
+        {
+            DestroyWindow(g_hwnd);
+            g_hwnd = nullptr;
+        }
+        // Ensure a second call to init() can succeed.
+        UnregisterClass(CLS_NAME, GetModuleHandle(0));
+
+        if(g_direct_input != nullptr)
+        {
+            g_direct_input->Release();
+            g_direct_input = nullptr;
+        }
+
+        close_control_events();
+        g_startup_failed = false;
+
+        logger->info("Shutdown complete");
+        return TRUE;
+    }
+    catch(std::exception const& e)
+    {
+        logger->critical("shutdown() failed: {}", e.what());
+        return FALSE;
+    }
+    catch(...)
+    {
+        logger->critical("shutdown() failed: unknown exception");
+        return FALSE;
+    }
 }
 
 void set_input_event_callback(JoystickInputEventCallback cb)
@@ -962,42 +1465,85 @@ void set_device_change_callback(DeviceChangeCallback cb)
 
 DeviceSummary get_device_information_by_index(size_t index)
 {
-    if(index < 0 || index >= g_data_store.active_guids.size())
+    try
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        if(index < 0 || index >= g_data_store.active_guids.size())
+        {
+            logger->warn(
+                "Attempting to retireve device summary for invalid index {}",
+                index
+            );
+            return DeviceSummary();
+        }
+        auto guid = g_data_store.active_guids[index];
+        const auto it = g_data_store.cache.find(guid);
+        if(it == g_data_store.cache.end())
+        {
+            return DeviceSummary();
+        }
+        return it->second;
+    }
+    catch(...)
     {
         return DeviceSummary();
     }
-    auto guid = g_data_store.active_guids[index];
-    return get_device_information_by_guid(guid);
 }
 
 DeviceSummary get_device_information_by_guid(GUID guid)
 {
-    if(g_data_store.cache.find(guid) == g_data_store.cache.end())
+    try
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        const auto it = g_data_store.cache.find(guid);
+        if(it == g_data_store.cache.end())
+        {
+            logger->warn(
+                "Attempting to retireve device summary for invalid GUID {}",
+                guid_to_string(guid)
+            );
+            return DeviceSummary();
+        }
+        return it->second;
+    }
+    catch(...)
     {
         return DeviceSummary();
     }
-
-    return g_data_store.cache[guid];
 }
 
 
 size_t get_device_count()
 {
-    return g_data_store.active_guids.size();
+    try
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        return g_data_store.active_guids.size();
+    }
+    catch(...)
+    {
+        return 0;
+    }
 }
 
 bool device_exists(GUID guid)
 {
-    bool exists = false;
-    for(auto const& dev_guid : g_data_store.active_guids)
+    try
     {
-        if(dev_guid == guid)
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        for(auto const& dev_guid : g_data_store.active_guids)
         {
-            exists = true;
+            if(dev_guid == guid)
+            {
+                return true;
+            }
         }
+        return false;
     }
-
-    return exists;
+    catch(...)
+    {
+        return false;
+    }
 }
 
 LONG get_axis(GUID guid, DWORD index)
@@ -1012,12 +1558,25 @@ LONG get_axis(GUID guid, DWORD index)
         return 0;
     }
 
-    return g_data_store.state[guid].axis[index];
+    try
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        const auto it = g_data_store.state.find(guid);
+        if(it == g_data_store.state.end())
+        {
+            return 0;
+        }
+        return it->second.axis[index];
+    }
+    catch(...)
+    {
+        return 0;
+    }
 }
 
 bool get_button(GUID guid, DWORD index)
 {
-    if(index < 0 || index >= 128)
+    if(index < 1 || index > 128)
     {
         logger->error(
             "{}: Requested invalid button index {}",
@@ -1027,12 +1586,25 @@ bool get_button(GUID guid, DWORD index)
         return false;
     }
 
-    return g_data_store.state[guid].button[index];
+    try
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        const auto it = g_data_store.state.find(guid);
+        if(it == g_data_store.state.end())
+        {
+            return false;
+        }
+        return it->second.button[index];
+    }
+    catch(...)
+    {
+        return false;
+    }
 }
 
 LONG get_hat(GUID guid, DWORD index)
 {
-    if(index < 0 || index >= 4)
+    if(index < 1 || index > 4)
     {
         logger->error(
             "{}: Requested invalid hat index {}",
@@ -1042,7 +1614,20 @@ LONG get_hat(GUID guid, DWORD index)
         return -1;
     }
 
-    return g_data_store.state[guid].hat[index];
+    try
+    {
+        std::lock_guard<std::mutex> lock(g_data_store_mutex);
+        const auto it = g_data_store.state.find(guid);
+        if(it == g_data_store.state.end())
+        {
+            return -1;
+        }
+        return it->second.hat[index];
+    }
+    catch(...)
+    {
+        return -1;
+    }
 }
 
 DWORD get_vendor_id(LPDIRECTINPUTDEVICE8 device, GUID guid)
